@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>塗裝編輯器</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Microsoft JhengHei", sans-serif;
+    display: flex; flex-direction: column;
+    background: #1e1e24; color: #eee; font-size: 14px;
+  }
+  header {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 8px 12px; background: #2a2a33; border-bottom: 1px solid #444;
+  }
+  button {
+    font-family: inherit; font-size: 14px; padding: 6px 14px;
+    background: #3d6fd0; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: #4d80e6; }
+  button.minor { background: #55555f; }
+  button.minor:hover { background: #6a6a75; }
+  button.active { background: #2fa35c; }
+  button.big { width: 100%; padding: 10px; font-size: 16px; background: #2fa35c; }
+  button.big:hover { background: #37b96a; }
+  header .sep { width: 1px; height: 24px; background: #555; margin: 0 4px; }
+  #fileName { color: #aaa; margin-left: auto; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #canvasWrap { flex: 1; overflow: hidden; position: relative; background: #111; cursor: grab; }
+  #canvasWrap.adding { cursor: crosshair; }
+  #canvasWrap.picking { cursor: copy; }
+  #view { position: absolute; left: 0; top: 0; }
+  aside {
+    width: 300px; background: #26262e; border-left: 1px solid #444;
+    padding: 12px; overflow-y: auto; flex-shrink: 0;
+  }
+  aside h3 { margin: 14px 0 8px; font-size: 15px; color: #9db8e8; }
+  aside h3:first-child { margin-top: 0; }
+  .field { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .field label { width: 72px; flex-shrink: 0; color: #ccc; }
+  .field input[type=text], .field input[type=number] {
+    flex: 1; min-width: 0; padding: 6px 8px; font-size: 14px;
+    background: #1a1a20; color: #eee; border: 1px solid #555; border-radius: 4px;
+    font-family: inherit;
+  }
+  .field input[type=color] { width: 40px; height: 28px; padding: 0 2px; border: 1px solid #555; border-radius: 4px; background: #1a1a20; }
+  .field .pick { padding: 4px 8px; font-size: 12px; }
+  #autoMsg { color: #8fd19e; font-size: 13px; line-height: 1.6; margin-top: 8px; min-height: 20px; }
+  #autoMsg.err { color: #e89090; }
+  #zoneList { list-style: none; margin: 0 0 10px; padding: 0; }
+  #zoneList li {
+    padding: 5px 8px; margin-bottom: 4px; border-radius: 5px; cursor: pointer;
+    background: #333340; border: 1px solid transparent; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #zoneList li.sel { border-color: #4d80e6; background: #3a4a6e; }
+  #noSel { color: #888; font-size: 13px; }
+  #help {
+    margin-top: 14px; padding-top: 10px; border-top: 1px solid #444;
+    color: #999; font-size: 12.5px; line-height: 1.7;
+  }
+  #zoomLabel { color: #aaa; min-width: 48px; text-align: center; }
+  details { margin-top: 16px; border-top: 1px solid #444; padding-top: 8px; }
+  summary { cursor: pointer; color: #9db8e8; font-size: 15px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <button id="btnOpen">開啟圖片</button>
+  <span class="sep"></span>
+  <button id="btnExportDDS">匯出 DDS</button>
+  <button id="btnExportPNG" class="minor">匯出 PNG</button>
+  <span class="sep"></span>
+  <label style="display:flex;align-items:center;gap:4px;color:#ccc;cursor:pointer">
+    <input type="checkbox" id="chkFrames" checked> 顯示框線
+  </label>
+  <span id="zoomLabel">100%</span>
+  <span id="fileName">尚未開啟圖片</span>
+</header>
+<main>
+  <div id="canvasWrap"><canvas id="view"></canvas></div>
+  <aside>
+    <h3>自動修改文字</h3>
+    <div class="field"><label>地區</label><input type="text" id="fRegion" placeholder="例：臺中市政府警察局"></div>
+    <div class="field"><label>分局</label><input type="text" id="fBranch" placeholder="例：第五分局"></div>
+    <div class="field"><label>編號</label><input type="text" id="fNum" placeholder="例：568"></div>
+    <button id="btnAuto" class="big">自動偵測並套用</button>
+    <div id="autoMsg">留空的欄位不會修改。<br>按下後會自動找到圖上所有文字（含鏡像面），以相同大小、顏色換成新文字。</div>
+
+    <details>
+      <summary>手動微調（需要時才用）</summary>
+      <button id="btnAdd" class="minor" style="width:100%;margin-bottom:8px">＋手動新增文字框</button>
+      <ul id="zoneList"></ul>
+      <div id="zoneEditor" style="display:none">
+        <div class="field"><label>文字</label><input type="text" id="zText"></div>
+        <div class="field"><label>字體大小</label><input type="number" id="zSize" min="4" max="600"></div>
+        <div class="field"><label>文字顏色</label><input type="color" id="zColor"><button class="pick minor" id="pickText">吸管</button></div>
+        <div class="field"><label>背景顏色</label><input type="color" id="zBg"><button class="pick minor" id="pickBg">吸管</button>
+          <label style="display:flex;align-items:center;gap:3px;cursor:pointer"><input type="checkbox" id="zFill">填</label></div>
+        <div class="field"><label>鏡像</label><input type="checkbox" id="zMirror">
+          <label style="margin-left:10px">旋轉</label>
+          <select id="zRot" style="background:#1a1a20;color:#eee;border:1px solid #555;border-radius:4px;padding:4px">
+            <option value="0">0°</option><option value="90">90°</option>
+            <option value="180">180°</option><option value="270">270°</option>
+          </select></div>
+        <div class="field"><button id="btnDelZone" class="minor" style="background:#8d3a3a">刪除此文字框</button></div>
+      </div>
+      <div id="noSel">點圖上的框可以選取微調：拖曳移動、方向鍵微調、拖右下角綠點調大小、Delete 刪除。</div>
+      <div style="margin-top:10px;display:flex;gap:6px">
+        <button id="btnSaveTpl" class="minor" style="flex:1">儲存範本</button>
+        <button id="btnLoadTpl" class="minor" style="flex:1">載入範本</button>
+      </div>
+    </details>
+
+    <div id="help">
+      <b>使用流程</b><br>
+      1. 開啟車輛的 DDS 圖片<br>
+      2. 輸入要改的地區／分局／編號<br>
+      3. 按「自動偵測並套用」<br>
+      4. 檢查沒問題後按「匯出 DDS」<br>
+      <br>
+      字型固定為標楷體（粗體）。<br>
+      設定會依檔名自動記住。
+    </div>
+  </aside>
+</main>
+<script>
+'use strict';
+/* ============ DDS 解碼（DXT1 / DXT3 / DXT5 / 未壓縮） ============ */
+function parseDDS(ab) {
+  const dv = new DataView(ab);
+  if (dv.getUint32(0, true) !== 0x20534444) throw new Error('不是 DDS 檔');
+  const height = dv.getUint32(12, true), width = dv.getUint32(16, true);
+  const pfFlags = dv.getUint32(80, true);
+  const fourcc = String.fromCharCode(dv.getUint8(84), dv.getUint8(85), dv.getUint8(86), dv.getUint8(87));
+  const data = new Uint8Array(ab, 128);
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  if (pfFlags & 0x4) {
+    if (fourcc !== 'DXT1' && fourcc !== 'DXT3' && fourcc !== 'DXT5')
+      throw new Error('不支援的格式: ' + fourcc);
+    decodeBC(data, width, height, fourcc, rgba);
+  } else if (pfFlags & 0x40) {
+    const bpp = dv.getUint32(88, true);
+    if (bpp !== 32) throw new Error('僅支援 32 位元未壓縮 DDS');
+    const rMask = dv.getUint32(92, true);
+    for (let i = 0; i < width * height; i++) {
+      const o = i * 4;
+      if (rMask === 0xff0000) {
+        rgba[o] = data[o + 2]; rgba[o + 1] = data[o + 1]; rgba[o + 2] = data[o]; rgba[o + 3] = data[o + 3];
+      } else {
+        rgba[o] = data[o]; rgba[o + 1] = data[o + 1]; rgba[o + 2] = data[o + 2]; rgba[o + 3] = data[o + 3];
+      }
+    }
+  } else throw new Error('不支援的 DDS 像素格式');
+  return { width, height, rgba };
+}
+function rgb565to888(v) {
+  return [((v >> 11) & 31) * 255 / 31 | 0, ((v >> 5) & 63) * 255 / 63 | 0, (v & 31) * 255 / 31 | 0];
+}
+function decodeBC(data, width, height, fourcc, out) {
+  const bw = Math.max(1, width >> 2), bh = Math.max(1, height >> 2);
+  const bs = fourcc === 'DXT1' ? 8 : 16;
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+    const off = (by * bw + bx) * bs;
+    let alphas = null, coff = off;
+    if (fourcc === 'DXT3') {
+      alphas = [];
+      for (let i = 0; i < 8; i++) { const b = data[off + i]; alphas.push((b & 15) * 17, (b >> 4) * 17); }
+      coff = off + 8;
+    } else if (fourcc === 'DXT5') {
+      const a0 = data[off], a1 = data[off + 1];
+      let bits = 0n;
+      for (let i = 0; i < 6; i++) bits |= BigInt(data[off + 2 + i]) << BigInt(8 * i);
+      alphas = [];
+      for (let i = 0; i < 16; i++) {
+        const c = Number((bits >> BigInt(3 * i)) & 7n);
+        let a;
+        if (c === 0) a = a0; else if (c === 1) a = a1;
+        else if (a0 > a1) a = ((8 - c) * a0 + (c - 1) * a1) / 7;
+        else if (c < 6) a = ((6 - c) * a0 + (c - 1) * a1) / 5;
+        else a = c === 6 ? 0 : 255;
+        alphas.push(a | 0);
+      }
+      coff = off + 8;
+    }
+    const c0 = dv.getUint16(coff, true), c1 = dv.getUint16(coff + 2, true);
+    const idx = dv.getUint32(coff + 4, true);
+    const p0 = rgb565to888(c0), p1 = rgb565to888(c1);
+    const colors = [p0, p1];
+    const oneBitAlpha = fourcc === 'DXT1' && c0 <= c1;
+    if (oneBitAlpha) colors.push(p0.map((v, i) => (v + p1[i]) >> 1), [0, 0, 0]);
+    else colors.push(p0.map((v, i) => (2 * v + p1[i]) / 3 | 0), p0.map((v, i) => (v + 2 * p1[i]) / 3 | 0));
+    for (let py = 0; py < 4; py++) for (let px = 0; px < 4; px++) {
+      const x = bx * 4 + px, y = by * 4 + py;
+      if (x >= width || y >= height) continue;
+      const code = (idx >> (2 * (py * 4 + px))) & 3;
+      const o = (y * width + x) * 4;
+      out[o] = colors[code][0]; out[o + 1] = colors[code][1]; out[o + 2] = colors[code][2];
+      out[o + 3] = alphas ? alphas[py * 4 + px] : (oneBitAlpha && code === 3 ? 0 : 255);
+    }
+  }
+}
+
+/* ============ DXT1 編碼 + DDS 輸出 ============ */
+function to565(r, g, b) {
+  return ((r * 31 / 255 + 0.5 | 0) << 11) | ((g * 63 / 255 + 0.5 | 0) << 5) | (b * 31 / 255 + 0.5 | 0);
+}
+function encodeDXT1(rgba, w, h) {
+  const bw = Math.ceil(w / 4), bh = Math.ceil(h / 4);
+  const out = new Uint8Array(bw * bh * 8);
+  const dv = new DataView(out.buffer);
+  let o = 0;
+  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+    const px = [];
+    let mnr = 255, mng = 255, mnb = 255, mxr = 0, mxg = 0, mxb = 0;
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+      const sx = Math.min(bx * 4 + x, w - 1), sy = Math.min(by * 4 + y, h - 1);
+      const i = (sy * w + sx) * 4;
+      const r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+      px.push(r, g, b);
+      if (r < mnr) mnr = r; if (r > mxr) mxr = r;
+      if (g < mng) mng = g; if (g > mxg) mxg = g;
+      if (b < mnb) mnb = b; if (b > mxb) mxb = b;
+    }
+    let c0 = to565(mxr, mxg, mxb), c1 = to565(mnr, mng, mnb);
+    let indices = 0;
+    if (c0 < c1) { const t = c0; c0 = c1; c1 = t; }
+    if (c0 !== c1) {
+      const e0 = rgb565to888(c0), e1 = rgb565to888(c1);
+      const pal = [e0, e1,
+        [(2 * e0[0] + e1[0]) / 3 | 0, (2 * e0[1] + e1[1]) / 3 | 0, (2 * e0[2] + e1[2]) / 3 | 0],
+        [(e0[0] + 2 * e1[0]) / 3 | 0, (e0[1] + 2 * e1[1]) / 3 | 0, (e0[2] + 2 * e1[2]) / 3 | 0]];
+      for (let i = 0; i < 16; i++) {
+        const r = px[i * 3], g = px[i * 3 + 1], b = px[i * 3 + 2];
+        let best = 0, bd = Infinity;
+        for (let k = 0; k < 4; k++) {
+          const dr = r - pal[k][0], dg = g - pal[k][1], db = b - pal[k][2];
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bd) { bd = d; best = k; }
+        }
+        indices |= best << (2 * i);
+      }
+    }
+    dv.setUint16(o, c0, true); dv.setUint16(o + 2, c1, true);
+    dv.setUint32(o + 4, indices >>> 0, true);
+    o += 8;
+  }
+  return out;
+}
+function makeDDS(rgba, w, h) {
+  const body = encodeDXT1(rgba, w, h);
+  const header = new ArrayBuffer(128);
+  const dv = new DataView(header);
+  dv.setUint32(0, 0x20534444, true);
+  dv.setUint32(4, 124, true);
+  dv.setUint32(8, 0x00081007, true);
+  dv.setUint32(12, h, true);
+  dv.setUint32(16, w, true);
+  dv.setUint32(20, body.length, true);
+  dv.setUint32(76, 32, true);
+  dv.setUint32(80, 0x4, true);
+  dv.setUint32(84, 0x31545844, true);
+  dv.setUint32(108, 0x1000, true);
+  return new Blob([header, body], { type: 'application/octet-stream' });
+}
+
+/* ============ 應用程式狀態 ============ */
+const FONT = '"DFKai-SB","標楷體","KaiTi",serif';       // 中文：標楷體（不加粗）
+const NUMFONT = '"Arial Black",Arial,sans-serif';        // 數字：Arial Black（粗體）
+function fontFor(text, size) {
+  return /^[0-9 ]+$/.test(text) ? '900 ' + size + 'px ' + NUMFONT : size + 'px ' + FONT;
+}
+const wrap = document.getElementById('canvasWrap');
+const view = document.getElementById('view');
+const vctx = view.getContext('2d');
+const composed = document.createElement('canvas');
+const cctx = composed.getContext('2d');
+let baseCanvas = null;
+let imgW = 0, imgH = 0;
+let fileBase = '';
+let zones = [];   // {x,y,w,h,text,size,color,bg,fill,mirror,rot,spacing,auto,cls}
+let selIdx = -1;
+let zoom = 1, panX = 0, panY = 0;
+let lastSize = 100;
+let mode = 'normal';
+let drag = null;
+
+function compose() {
+  if (!baseCanvas) return;
+  cctx.clearRect(0, 0, imgW, imgH);
+  cctx.drawImage(baseCanvas, 0, 0);
+  for (const z of zones) {
+    if (z.fill) { cctx.fillStyle = z.bg; cctx.fillRect(z.x, z.y, z.w, z.h); }
+    if (!z.text) continue;
+    cctx.save();
+    cctx.translate(z.x + z.w / 2, z.y + z.h / 2);
+    if (z.mirror) cctx.scale(-1, 1);
+    if (z.rot) cctx.rotate(z.rot * Math.PI / 180);
+    cctx.font = fontFor(z.text, z.size);
+    cctx.letterSpacing = (z.spacing || 0) + 'px';
+    cctx.fillStyle = z.color;
+    cctx.textAlign = 'center';
+    cctx.textBaseline = 'middle';
+    // letterSpacing 會加在最後一個字後面，置中時往左補回一半
+    cctx.fillText(z.text, (z.spacing || 0) / 2, 0);
+    cctx.letterSpacing = '0px';
+    cctx.restore();
+  }
+}
+function render() {
+  const r = wrap.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  view.width = r.width * dpr; view.height = r.height * dpr;
+  view.style.width = r.width + 'px'; view.style.height = r.height + 'px';
+  vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  vctx.clearRect(0, 0, r.width, r.height);
+  if (!baseCanvas) {
+    vctx.fillStyle = '#666'; vctx.font = '18px "Microsoft JhengHei"';
+    vctx.textAlign = 'center';
+    vctx.fillText('請按「開啟圖片」選擇 DDS / PNG 檔', r.width / 2, r.height / 2);
+    return;
+  }
+  vctx.imageSmoothingEnabled = zoom < 2;
+  vctx.translate(panX, panY); vctx.scale(zoom, zoom);
+  vctx.drawImage(composed, 0, 0);
+  if (document.getElementById('chkFrames').checked) {
+    vctx.lineWidth = 1.5 / zoom;
+    zones.forEach((z, i) => {
+      vctx.strokeStyle = i === selIdx ? '#00e676' : (z.auto ? 'rgba(255,180,60,.9)' : 'rgba(80,150,255,.85)');
+      vctx.strokeRect(z.x, z.y, z.w, z.h);
+      if (i === selIdx) {
+        const s = 10 / zoom;
+        vctx.fillStyle = '#00e676';
+        vctx.fillRect(z.x + z.w - s / 2, z.y + z.h - s / 2, s, s);
+      }
+    });
+  }
+  document.getElementById('zoomLabel').textContent = Math.round(zoom * 100) + '%';
+}
+function refresh() { compose(); render(); saveAuto(); }
+
+/* ============ 自動偵測引擎 ============ */
+// 找出圖上所有文字行：連通元件 → 併成字 → 併成行 → 分類
+function detectTextLines() {
+  const d = baseCanvas.getContext('2d').getImageData(0, 0, imgW, imgH).data;
+  const N = imgW * imgH;
+  const ink = new Uint8Array(N);   // 1=深色字 2=淺色字
+  for (let i = 0; i < N; i++) {
+    const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx - mn < 70) {  // 低彩度（排除黃色徽章等圖案）
+      const lum = (r * 299 + g * 587 + b * 114) / 1000;
+      if (lum < 110) ink[i] = 1; else if (lum > 185) ink[i] = 2;
+    }
+  }
+  // 連通元件（8 方向）
+  const label = new Int32Array(N);
+  const stack = new Int32Array(N);
+  const comps = [];
+  for (let start = 0; start < N; start++) {
+    const t = ink[start];
+    if (!t || label[start]) continue;
+    const id = comps.length + 1;
+    let sp = 0; stack[sp++] = start; label[start] = id;
+    let minx = imgW, miny = imgH, maxx = 0, maxy = 0, area = 0, sr = 0, sg = 0, sb = 0;
+    while (sp > 0) {
+      const p = stack[--sp];
+      const x = p % imgW, y = (p / imgW) | 0;
+      area++; sr += d[p * 4]; sg += d[p * 4 + 1]; sb += d[p * 4 + 2];
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= imgW || ny >= imgH) continue;
+        const q = ny * imgW + nx;
+        if (ink[q] === t && !label[q]) { label[q] = id; stack[sp++] = q; }
+      }
+    }
+    const w = maxx - minx + 1, h = maxy - miny + 1;
+    // 過濾：太小＝雜點、太大＝車身色塊、貼邊＝背景
+    if (w < 6 || h < 9 || w > 400 || h > 400 || area < 30 || area > 60000) continue;
+    if (minx === 0 || miny === 0 || maxx === imgW - 1 || maxy === imgH - 1) continue;
+    const fill = area / (w * h);
+    if (fill < 0.06 || fill > 0.85) continue;
+    comps.push({ t, x: minx, y: miny, w, h, area,
+      color: [sr / area | 0, sg / area | 0, sb / area | 0] });
+  }
+  // 併成「行」：同色系、垂直重疊、水平距離近
+  comps.sort((a, b) => (a.x - b.x));
+  const lines = [];
+  for (const c of comps) {
+    const cy = c.y + c.h / 2;
+    let best = null;
+    for (const L of lines) {
+      if (L.t !== c.t) continue;
+      const lh = Math.max(L.gh, c.h);
+      if (Math.abs(cy - L.cy) > lh * 0.6) continue;
+      const gap = c.x - L.maxx;
+      if (gap > lh * 2.2 || gap < -lh) continue;
+      best = L; break;
+    }
+    if (best) {
+      best.comps.push(c);
+      best.maxx = Math.max(best.maxx, c.x + c.w);
+      best.gh = Math.max(best.gh, c.h);
+      best.cy = (best.cy * (best.comps.length - 1) + cy) / best.comps.length;
+    } else {
+      lines.push({ t: c.t, comps: [c], maxx: c.x + c.w, gh: c.h, cy });
+    }
+  }
+  const out = [];
+  for (const L of lines) {
+    if (L.comps.length < 2) continue;
+    // 把 X 範圍重疊的元件合併成「字」（處理「三」這種分離筆畫）
+    const glyphs = [];
+    for (const c of L.comps) {
+      let g = glyphs.find(g2 => Math.min(g2.x + g2.w, c.x + c.w) - Math.max(g2.x, c.x) > Math.min(g2.w, c.w) * 0.3);
+      if (g) {
+        const x2 = Math.max(g.x + g.w, c.x + c.w), y2 = Math.max(g.y + g.h, c.y + c.h);
+        g.x = Math.min(g.x, c.x); g.y = Math.min(g.y, c.y);
+        g.w = x2 - g.x; g.h = y2 - g.y; g.area += c.area;
+      } else glyphs.push({ x: c.x, y: c.y, w: c.w, h: c.h, area: c.area });
+    }
+    if (glyphs.length < 2 || glyphs.length > 20) continue;
+    const hs = glyphs.map(g => g.h).sort((a, b) => a - b);
+    const gh = hs[hs.length - 1];
+    if (hs[0] < gh * 0.3) continue;  // 高度差太大不像同一行字
+    const x0 = Math.min(...glyphs.map(g => g.x)), x1 = Math.max(...glyphs.map(g => g.x + g.w));
+    const y0 = Math.min(...glyphs.map(g => g.y)), y1 = Math.max(...glyphs.map(g => g.y + g.h));
+    if (x1 - x0 < gh * 1.2) continue;
+    // 平均字寬高比：數字窄、中文接近方形
+    const aspects = glyphs.map(g => g.w / g.h).sort((a, b) => a - b);
+    const aspect = aspects[aspects.length >> 1];
+    // 文字顏色 = 元件平均色
+    let cr = 0, cg = 0, cb = 0, ca = 0;
+    for (const c of L.comps) { cr += c.color[0] * c.area; cg += c.color[1] * c.area; cb += c.color[2] * c.area; ca += c.area; }
+    out.push({
+      x: x0, y: y0, w: x1 - x0, h: y1 - y0, glyphs, gh, aspect, t: L.t,
+      color: rgbHex(cr / ca | 0, cg / ca | 0, cb / ca | 0)
+    });
+  }
+  return { lines: out, ink };
+}
+function rgbHex(r, g, b) {
+  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
+}
+// 行外圍取樣，找背景色（取最常見的顏色）
+function sampleBg(line) {
+  const g = baseCanvas.getContext('2d');
+  const pad = Math.round(line.gh * 0.55);
+  const x0 = Math.max(0, line.x - pad), y0 = Math.max(0, line.y - pad);
+  const x1 = Math.min(imgW - 1, line.x + line.w + pad), y1 = Math.min(imgH - 1, line.y + line.h + pad);
+  const counts = {};
+  const step = Math.max(2, ((x1 - x0) / 40) | 0);
+  const take = (x, y) => {
+    const p = g.getImageData(x, y, 1, 1).data;
+    const key = ((p[0] >> 4) << 8) | ((p[1] >> 4) << 4) | (p[2] >> 4);
+    (counts[key] = counts[key] || { n: 0, r: 0, g: 0, b: 0 });
+    counts[key].n++; counts[key].r += p[0]; counts[key].g += p[1]; counts[key].b += p[2];
+  };
+  for (let x = x0; x <= x1; x += step) { take(x, y0); take(x, y1); }
+  for (let y = y0; y <= y1; y += step) { take(x0, y); take(x1, y); }
+  let best = null;
+  for (const k in counts) if (!best || counts[k].n > best.n) best = counts[k];
+  return rgbHex(best.r / best.n | 0, best.g / best.n | 0, best.b / best.n | 0);
+}
+// 字級校正：實際量測標楷體字的墨水高度，讓新字大小 = 舊字大小
+let _calib = null;
+function calibFactor(kind) {
+  if (!_calib) {
+    _calib = {};
+    for (const [k, ch] of [['cjk', '警'], ['num', '8']]) {
+      const c = document.createElement('canvas');
+      c.width = 300; c.height = 300;
+      const g = c.getContext('2d');
+      g.font = k === 'num' ? '900 200px ' + NUMFONT : '200px ' + FONT;
+      g.textBaseline = 'top';
+      g.fillText(ch, 40, 30);
+      const d = g.getImageData(0, 0, 300, 300).data;
+      let top = 300, bot = 0;
+      for (let y = 0; y < 300; y++) for (let x = 0; x < 300; x++)
+        if (d[(y * 300 + x) * 4 + 3] > 40) { if (y < top) top = y; if (y > bot) bot = y; }
+      _calib[k] = bot > top ? 200 / (bot - top + 1) : 1;
+    }
+  }
+  return _calib[kind];
+}
+// ---- 2D 形狀比對：把舊字與新字都縮成 96×24 的灰階圖來比較 ----
+const MW = 96, MH = 24;
+function sampleMask(src, sx, sy, sw, sh, flip) {
+  const c = document.createElement('canvas');
+  c.width = MW; c.height = MH;
+  const g = c.getContext('2d');
+  if (flip) { g.translate(MW, 0); g.scale(-1, 1); }
+  g.drawImage(src, sx, sy, sw, sh, 0, 0, MW, MH);
+  const d = g.getImageData(0, 0, MW, MH).data;
+  const v = new Float64Array(MW * MH);
+  for (let i = 0; i < v.length; i++) v[i] = d[i * 4 + 3];
+  return normalizeVec(v);
+}
+function normalizeVec(v) {
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  let norm = 0;
+  for (let i = 0; i < v.length; i++) { v[i] -= mean; norm += v[i] * v[i]; }
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < v.length; i++) v[i] /= norm;
+  return v;
+}
+// 舊文字行的形狀（正向與左右翻轉兩種）
+function lineMasks(ink, L) {
+  const c = document.createElement('canvas');
+  c.width = L.w; c.height = L.h;
+  const img = new ImageData(L.w, L.h);
+  for (let y = 0; y < L.h; y++) for (let x = 0; x < L.w; x++) {
+    if (ink[(L.y + y) * imgW + L.x + x] === L.t) img.data[(y * L.w + x) * 4 + 3] = 255;
+  }
+  c.getContext('2d').putImageData(img, 0, 0);
+  return {
+    normal: sampleMask(c, 0, 0, L.w, L.h, false),
+    flipped: sampleMask(c, 0, 0, L.w, L.h, true),
+  };
+}
+// 新文字渲染後的形狀
+function textMask(text, size, spacing) {
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(size * (text.length + 2) + spacing * text.length);
+  c.height = Math.ceil(size * 1.8);
+  const g = c.getContext('2d');
+  g.font = fontFor(text, size);
+  g.letterSpacing = spacing + 'px';
+  g.textBaseline = 'middle';
+  g.fillText(text, size / 2, c.height / 2);
+  const d = g.getImageData(0, 0, c.width, c.height).data;
+  let x0 = c.width, x1 = 0, y0 = c.height, y1 = 0;
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+    if (d[(y * c.width + x) * 4 + 3] > 40) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+  }
+  if (x1 <= x0) return null;
+  return sampleMask(c, x0, y0, x1 - x0 + 1, y1 - y0 + 1, false);
+}
+function cosSim(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+
+// 主流程：偵測 → 分類 → 依欄位內容產生文字框
+function autoApply() {
+  const msg = document.getElementById('autoMsg');
+  if (!baseCanvas) { msg.textContent = '請先開啟圖片'; msg.className = 'err'; return; }
+  const fields = {
+    region: document.getElementById('fRegion').value.trim(),
+    branch: document.getElementById('fBranch').value.trim(),
+    num: document.getElementById('fNum').value.trim(),
+  };
+  if (!fields.region && !fields.branch && !fields.num) {
+    msg.textContent = '請至少填一個欄位'; msg.className = 'err'; return;
+  }
+  msg.textContent = '偵測中…'; msg.className = '';
+  setTimeout(() => {
+    const { lines, ink } = detectTextLines();
+    // 每一行文字都跟三個欄位的「新文字渲染形狀」做正反向比對，
+    // 取最像的欄位作為分類，同時得知是否為鏡像面
+    const fieldList = [['region', fields.region], ['branch', fields.branch], ['num', fields.num]]
+      .filter(f => f[1]);
+    zones = zones.filter(z => !z.auto);
+    const count = { region: 0, branch: 0, num: 0 };
+    const made = [];
+    for (const L of lines) {
+      const masks = lineMasks(ink, L);
+      let best = null;
+      for (const [cls, text] of fieldList) {
+        const isNum = /^[0-9 ]+$/.test(text);
+        const size = Math.round(L.gh * calibFactor(isNum ? 'num' : 'cjk'));
+        // 字距：讓新文字寬度貼近舊文字寬度
+        cctx.font = fontFor(text, size);
+        const natural = cctx.measureText(text).width;
+        let spacing = text.length > 1 ? (L.w - natural) / (text.length - 1) : 0;
+        spacing = Math.max(0, Math.min(spacing, size * 1.6));
+        const tmN = textMask(text, size, spacing);
+        if (!tmN) continue;
+        // 三種可能：正向、反序（車身右側傳統右到左寫法，字是正的）、真鏡像
+        const rev = [...text].reverse().join('');
+        const tmR = rev !== text ? textMask(rev, size, spacing) : null;
+        const simN = cosSim(masks.normal, tmN);
+        const simR = tmR ? cosSim(masks.normal, tmR) : -1;
+        const simF = cosSim(masks.flipped, tmN);
+        let mode = 'normal', sim = simN;
+        if (simR > sim + 0.02) { mode = 'rtl'; sim = simR; }
+        if (simF > sim + 0.02) { mode = 'mirror'; sim = simF; }
+        if (isNum) {
+          // 數字（如 323）常是回文，形狀分不出方向 → 先取正向，之後跟著最近的中文行決定
+          mode = 'normal';
+          sim = Math.max(simN, simR, simF);
+        }
+        // 字數一致加分、差太多扣分
+        const diff = Math.abs(L.glyphs.length - text.replace(/\s/g, '').length);
+        const score = sim + (diff === 0 ? 0.1 : diff === 1 ? 0 : -0.2 * diff);
+        if (!best || score > best.score) {
+          best = { cls, text: mode === 'rtl' ? rev : text, size, mode,
+            spacing: Math.round(spacing), mirror: mode === 'mirror', score };
+        }
+      }
+      if (!best || best.score < 0.35) continue;  // 不像任何欄位的文字，跳過不動
+      const pad = Math.round(L.gh * 0.4);
+      made.push({
+        x: L.x - pad, y: L.y - pad, w: L.w + pad * 2, h: L.h + pad * 2,
+        text: best.text, size: best.size, color: L.color, bg: sampleBg(L), fill: true,
+        mirror: best.mirror, rot: 0, spacing: best.spacing, auto: true,
+        cls: best.cls, mode: best.mode
+      });
+      count[best.cls]++;
+    }
+    // 編號方向跟著同一側（最近）的中文行：中文反序 → 數字也反序（第三分局配321，局分三第配123）
+    for (const z of made) {
+      if (z.cls !== 'num') continue;
+      let nearest = null, nd = Infinity;
+      for (const o of made) {
+        if (o.cls === 'num') continue;
+        const d = (o.x + o.w / 2 - z.x - z.w / 2) ** 2 + (o.y + o.h / 2 - z.y - z.h / 2) ** 2;
+        if (d < nd) { nd = d; nearest = o; }
+      }
+      if (nearest && nearest.mode === 'rtl') { z.text = [...z.text].reverse().join(''); z.mode = 'rtl'; }
+      else if (nearest && nearest.mode === 'mirror') { z.mirror = true; z.mode = 'mirror'; }
+    }
+    zones.push(...made);
+    selIdx = -1; syncEditor(); renderList(); refresh();
+    const parts = [];
+    if (count.region) parts.push('地區×' + count.region);
+    if (count.branch) parts.push('分局×' + count.branch);
+    if (count.num) parts.push('編號×' + count.num);
+    if (parts.length) {
+      msg.className = '';
+      msg.innerHTML = '已套用：' + parts.join('、') +
+        '（橘框）<br>請檢查畫面，沒問題就按「匯出 DDS」。<br>有偏差可在「手動微調」裡調整。';
+    } else {
+      msg.className = 'err';
+      msg.textContent = '找不到對應的文字，請改用「手動微調」新增文字框。';
+    }
+  }, 30);
+}
+
+/* ---- 文字框清單 / 編輯面板 ---- */
+const CLS_NAME = { region: '地區', branch: '分局', num: '編號' };
+const listEl = document.getElementById('zoneList');
+function renderList() {
+  listEl.innerHTML = '';
+  zones.forEach((z, i) => {
+    const li = document.createElement('li');
+    const tag = z.cls ? '[' + CLS_NAME[z.cls] + '] ' : '';
+    li.textContent = (i + 1) + '. ' + tag + (z.text || '(空白)') + (z.mirror ? '（鏡像）' : '');
+    if (i === selIdx) li.classList.add('sel');
+    li.onclick = () => { selIdx = i; syncEditor(); render(); renderList(); };
+    listEl.appendChild(li);
+  });
+}
+function syncEditor() {
+  const ed = document.getElementById('zoneEditor');
+  const no = document.getElementById('noSel');
+  const z = zones[selIdx];
+  if (!z) { ed.style.display = 'none'; no.style.display = ''; return; }
+  ed.style.display = ''; no.style.display = 'none';
+  document.getElementById('zText').value = z.text;
+  document.getElementById('zSize').value = z.size;
+  document.getElementById('zColor').value = z.color;
+  document.getElementById('zBg').value = z.bg;
+  document.getElementById('zFill').checked = z.fill;
+  document.getElementById('zMirror').checked = z.mirror;
+  document.getElementById('zRot').value = z.rot;
+}
+function bindEditor() {
+  const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+  on('zText', 'input', e => { const z = zones[selIdx]; if (z) { z.text = e.target.value; refresh(); renderList(); } });
+  on('zSize', 'input', e => { const z = zones[selIdx]; if (z) { z.size = +e.target.value || z.size; lastSize = z.size; refresh(); } });
+  on('zColor', 'input', e => { const z = zones[selIdx]; if (z) { z.color = e.target.value; refresh(); } });
+  on('zBg', 'input', e => { const z = zones[selIdx]; if (z) { z.bg = e.target.value; refresh(); } });
+  on('zFill', 'change', e => { const z = zones[selIdx]; if (z) { z.fill = e.target.checked; refresh(); } });
+  on('zMirror', 'change', e => { const z = zones[selIdx]; if (z) { z.mirror = e.target.checked; refresh(); renderList(); } });
+  on('zRot', 'change', e => { const z = zones[selIdx]; if (z) { z.rot = +e.target.value; refresh(); } });
+  on('btnDelZone', 'click', () => { if (selIdx >= 0) { zones.splice(selIdx, 1); selIdx = -1; syncEditor(); refresh(); renderList(); } });
+  on('pickText', 'click', () => { mode = 'pickText'; wrap.className = 'picking'; });
+  on('pickBg', 'click', () => { mode = 'pickBg'; wrap.className = 'picking'; });
+}
+
+/* ---- 滑鼠互動 ---- */
+function toImg(e) {
+  const r = wrap.getBoundingClientRect();
+  return { x: (e.clientX - r.left - panX) / zoom, y: (e.clientY - r.top - panY) / zoom };
+}
+wrap.addEventListener('pointerdown', e => {
+  if (!baseCanvas) return;
+  const p = toImg(e);
+  wrap.setPointerCapture(e.pointerId);
+  if (mode === 'pickText' || mode === 'pickBg') {
+    const dpx = cctx.getImageData(Math.round(p.x), Math.round(p.y), 1, 1).data;
+    const hex = rgbHex(dpx[0], dpx[1], dpx[2]);
+    const z = zones[selIdx];
+    if (z) { if (mode === 'pickText') z.color = hex; else z.bg = hex; syncEditor(); refresh(); }
+    mode = 'normal'; wrap.className = '';
+    return;
+  }
+  if (mode === 'add') {
+    drag = { kind: 'create', sx: p.x, sy: p.y };
+    zones.push({ x: p.x, y: p.y, w: 1, h: 1, text: '', size: lastSize, color: '#14142a', bg: '#f5f5f5', fill: true, mirror: false, rot: 0, spacing: 0 });
+    selIdx = zones.length - 1;
+    return;
+  }
+  const z = zones[selIdx];
+  if (z) {
+    const s = 12 / zoom;
+    if (Math.abs(p.x - (z.x + z.w)) < s && Math.abs(p.y - (z.y + z.h)) < s) {
+      drag = { kind: 'resize' }; return;
+    }
+  }
+  for (let i = zones.length - 1; i >= 0; i--) {
+    const t = zones[i];
+    if (p.x >= t.x && p.x <= t.x + t.w && p.y >= t.y && p.y <= t.y + t.h) {
+      selIdx = i; syncEditor(); renderList();
+      drag = { kind: 'move', dx: p.x - t.x, dy: p.y - t.y };
+      render(); return;
+    }
+  }
+  drag = { kind: 'pan', sx: e.clientX - panX, sy: e.clientY - panY };
+  wrap.style.cursor = 'grabbing';
+});
+wrap.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = toImg(e);
+  if (drag.kind === 'pan') { panX = e.clientX - drag.sx; panY = e.clientY - drag.sy; render(); return; }
+  const z = zones[selIdx]; if (!z) return;
+  if (drag.kind === 'create') {
+    z.x = Math.min(drag.sx, p.x); z.y = Math.min(drag.sy, p.y);
+    z.w = Math.abs(p.x - drag.sx); z.h = Math.abs(p.y - drag.sy);
+  } else if (drag.kind === 'resize') {
+    z.w = Math.max(8, p.x - z.x); z.h = Math.max(8, p.y - z.y);
+  } else if (drag.kind === 'move') {
+    z.x = p.x - drag.dx; z.y = p.y - drag.dy;
+  }
+  compose(); render();
+});
+wrap.addEventListener('pointerup', () => {
+  if (drag && drag.kind === 'create') {
+    const z = zones[selIdx];
+    if (z.w < 5 || z.h < 5) { zones.pop(); selIdx = -1; }
+    mode = 'normal'; wrap.className = '';
+    document.getElementById('btnAdd').classList.remove('active');
+    syncEditor(); renderList();
+  }
+  if (drag && drag.kind === 'pan') wrap.style.cursor = 'grab';
+  if (drag && drag.kind !== 'pan') saveAuto();
+  drag = null; render();
+});
+wrap.addEventListener('wheel', e => {
+  if (!baseCanvas) return;
+  e.preventDefault();
+  const r = wrap.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const nz = Math.min(16, Math.max(0.05, zoom * f));
+  panX = mx - (mx - panX) * nz / zoom;
+  panY = my - (my - panY) * nz / zoom;
+  zoom = nz; render();
+}, { passive: false });
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const z = zones[selIdx]; if (!z) return;
+  const step = e.shiftKey ? 10 : 1;
+  if (e.key === 'Delete') { zones.splice(selIdx, 1); selIdx = -1; syncEditor(); refresh(); renderList(); }
+  else if (e.key === 'ArrowLeft') { z.x -= step; refresh(); }
+  else if (e.key === 'ArrowRight') { z.x += step; refresh(); }
+  else if (e.key === 'ArrowUp') { z.y -= step; refresh(); }
+  else if (e.key === 'ArrowDown') { z.y += step; refresh(); }
+  else return;
+  e.preventDefault();
+});
+
+/* ---- 開檔 / 匯出 / 記憶 ---- */
+function loadFile(file) {
+  const name = file.name;
+  fileBase = name.replace(/\.[^.]+$/, '');
+  const finish = canvas => {
+    baseCanvas = canvas; imgW = canvas.width; imgH = canvas.height;
+    composed.width = imgW; composed.height = imgH;
+    document.getElementById('fileName').textContent = name + '（' + imgW + '×' + imgH + '）';
+    zones = [];
+    try {
+      const saved = JSON.parse(localStorage.getItem('livery:' + fileBase));
+      if (saved) {
+        zones = saved.zones || (Array.isArray(saved) ? saved : []);
+        if (saved.fields) {
+          document.getElementById('fRegion').value = saved.fields.region || '';
+          document.getElementById('fBranch').value = saved.fields.branch || '';
+          document.getElementById('fNum').value = saved.fields.num || '';
+        }
+      }
+    } catch (e) {}
+    selIdx = -1; syncEditor(); renderList();
+    const r = wrap.getBoundingClientRect();
+    zoom = Math.min(r.width / imgW, r.height / imgH) * 0.95;
+    panX = (r.width - imgW * zoom) / 2; panY = (r.height - imgH * zoom) / 2;
+    compose(); render();
+    const msg = document.getElementById('autoMsg');
+    msg.className = '';
+    msg.textContent = zones.length
+      ? '已還原上次的文字框。要改新內容：輸入欄位後按「自動偵測並套用」。'
+      : '輸入要修改的欄位，然後按「自動偵測並套用」。';
+  };
+  if (/\.dds$/i.test(name)) {
+    file.arrayBuffer().then(ab => {
+      const { width, height, rgba } = parseDDS(ab);
+      const c = document.createElement('canvas');
+      c.width = width; c.height = height;
+      c.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+      finish(c);
+    }).catch(err => alert('讀取失敗：' + err.message));
+  } else {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      c.getContext('2d').drawImage(img, 0, 0);
+      finish(c);
+    };
+    img.src = URL.createObjectURL(file);
+  }
+}
+function pickFile(accept, cb) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = accept;
+  inp.onchange = () => inp.files[0] && cb(inp.files[0]);
+  inp.click();
+}
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+function saveAuto() {
+  if (!fileBase) return;
+  const fields = {
+    region: document.getElementById('fRegion').value,
+    branch: document.getElementById('fBranch').value,
+    num: document.getElementById('fNum').value,
+  };
+  try { localStorage.setItem('livery:' + fileBase, JSON.stringify({ zones, fields })); } catch (e) {}
+}
+document.getElementById('btnOpen').onclick = () => pickFile('.dds,.png,.jpg,.jpeg', loadFile);
+document.getElementById('btnAuto').onclick = autoApply;
+document.getElementById('btnAdd').onclick = () => {
+  if (!baseCanvas) { alert('請先開啟圖片'); return; }
+  mode = 'add'; wrap.className = 'adding';
+  document.getElementById('btnAdd').classList.add('active');
+};
+document.getElementById('btnExportDDS').onclick = () => {
+  if (!baseCanvas) return;
+  compose();
+  const d = cctx.getImageData(0, 0, imgW, imgH).data;
+  download(makeDDS(d, imgW, imgH), fileBase + '.dds');
+};
+document.getElementById('btnExportPNG').onclick = () => {
+  if (!baseCanvas) return;
+  compose();
+  composed.toBlob(b => download(b, fileBase + '.png'), 'image/png');
+};
+document.getElementById('btnSaveTpl').onclick = () => {
+  const blob = new Blob([JSON.stringify({ image: fileBase, zones }, null, 2)], { type: 'application/json' });
+  download(blob, (fileBase || '範本') + '.範本.json');
+};
+document.getElementById('btnLoadTpl').onclick = () => pickFile('.json', f => {
+  f.text().then(t => {
+    zones = JSON.parse(t).zones || [];
+    selIdx = -1; syncEditor(); renderList(); refresh();
+  });
+});
+document.getElementById('chkFrames').onchange = render;
+window.addEventListener('resize', render);
+bindEditor();
+render();
+// 測試用掛鉤
+window.__loadUrl = url => fetch(url).then(r => r.blob()).then(b => loadFile(new File([b], url.split('/').pop())));
+</script>
+</body>
+</html>
