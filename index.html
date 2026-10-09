@@ -753,16 +753,22 @@ function autoBranchAbbr(branch) {
 // 不像整個矩形塗色會蓋到旁邊的車身色塊。以 RLE 存，才能存進 localStorage
 function buildEraseMask(L, label, allComps) {
   const r = Math.max(2, Math.round(L.gh * 0.06));
-  const x0 = Math.max(0, L.x - r), y0 = Math.max(0, L.y - r);
-  const x1 = Math.min(imgW, L.x + L.w + r), y1 = Math.min(imgH, L.y + L.h + r);
-  const w = x1 - x0, h = y1 - y0;
-  // 這一行自己的筆畫，加上「完整落在這一行範圍內」的同色碎筆畫（點、短撇常被分到別組）
+  // 這一行自己的筆畫，加上「完整落在這一行範圍附近」的同色碎筆畫（點、短撇、斜行最低那個字的底橫常被分到別組）
   const ids = new Set(L.compIds);
   const m2 = Math.round(L.gh * 0.2);
+  let bx0 = L.x, by0 = L.y, bx1 = L.x + L.w, by1 = L.y + L.h;
   for (const c of allComps) {
     if (c.t === L.t && c.x >= L.x - m2 && c.y >= L.y - m2 &&
-        c.x + c.w <= L.x + L.w + m2 && c.y + c.h <= L.y + L.h + m2) ids.add(c.id);
+        c.x + c.w <= L.x + L.w + m2 && c.y + c.h <= L.y + L.h + m2) {
+      ids.add(c.id);
+      bx0 = Math.min(bx0, c.x); by0 = Math.min(by0, c.y);
+      bx1 = Math.max(bx1, c.x + c.w); by1 = Math.max(by1, c.y + c.h);
+    }
   }
+  // 遮罩範圍要涵蓋所有要塗掉的筆畫（不能只用行的外框，否則超出外框的那一截會留下來）
+  const x0 = Math.max(0, bx0 - r), y0 = Math.max(0, by0 - r);
+  const x1 = Math.min(imgW, bx1 + r), y1 = Math.min(imgH, by1 + r);
+  const w = x1 - x0, h = y1 - y0;
   let m = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (ids.has(label[(y0 + y) * imgW + x0 + x])) m[y * w + x] = 1;
@@ -988,10 +994,12 @@ function autoApply() {
     };
     for (const L of lines) {
       const cands = scoreLine(L, ink, fieldList);
+      // 倒轉 180 度要明顯比正向像才採用：0、8 倒過來一樣、6 倒過來是 9，分數接近時以正向為準
+      const eff = c => c.score - (c.mode === 'rot180' ? 0.05 : 0);
       let best = null;
       for (const c of cands) {
         if (!c.ok) continue;
-        if (!best || c.score > best.score) best = c;
+        if (!best || eff(c) > eff(best)) best = c;
       }
       if (!best) continue;  // 不像任何欄位的文字，跳過不動
       made.push(makeZone(L, best.cls, best.text, best.mode));
