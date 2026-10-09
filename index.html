@@ -86,6 +86,8 @@
     <div class="field"><label>地區</label><input type="text" id="fRegion" placeholder="例：臺中市政府警察局"></div>
     <div class="field"><label>分局</label><input type="text" id="fBranch" placeholder="例：第五分局"></div>
     <div class="field"><label>編號</label><input type="text" id="fNum" placeholder="例：568"></div>
+    <div class="field"><label>車頂簡稱</label><input type="text" id="fRegionAbbr" placeholder="地區(自動)">
+      <input type="text" id="fBranchAbbr" placeholder="分局(自動)"></div>
     <div class="field"><label>傾斜角度</label><input type="number" id="fTilt" value="0" step="0.5" style="width:70px;flex:none">
       <span style="color:#999;font-size:12px">度（正＝右高，0＝自動）</span></div>
     <button id="btnAuto" class="big">自動偵測並套用</button>
@@ -125,7 +127,7 @@
       3. 按「自動偵測並套用」<br>
       4. 檢查沒問題後按「匯出 DDS」<br>
       <br>
-      字型固定為標楷體（粗體）。<br>
+      字型：中文標楷體、數字 Arial Black。<br>
       設定會依檔名自動記住。
     </div>
   </aside>
@@ -158,7 +160,10 @@ function parseDDS(ab) {
       }
     }
   } else throw new Error('不支援的 DDS 像素格式');
-  return { width, height, rgba };
+  const mipCount = Math.max(1, dv.getUint32(28, true));
+  let alphaUsed = false;
+  for (let i = 3; i < rgba.length; i += 4) if (rgba[i] < 250) { alphaUsed = true; break; }
+  return { width, height, rgba, fourcc: (pfFlags & 0x4) ? fourcc : 'RGBA', mipCount, alphaUsed };
 }
 function rgb565to888(v) {
   return [((v >> 11) & 31) * 255 / 31 | 0, ((v >> 5) & 63) * 255 / 63 | 0, (v & 31) * 255 / 31 | 0];
@@ -254,21 +259,77 @@ function encodeDXT1(rgba, w, h) {
   }
   return out;
 }
-function makeDDS(rgba, w, h) {
-  const body = encodeDXT1(rgba, w, h);
+// DXT5：顏色區塊同 DXT1（四色模式），前面多 8 bytes 透明區塊
+function encodeDXT5(rgba, w, h) {
+  const color = encodeDXT1(rgba, w, h);
+  const bw = Math.ceil(w / 4), bh = Math.ceil(h / 4);
+  const out = new Uint8Array(bw * bh * 16);
+  let b = 0;
+  for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++, b++) {
+    const al = [];
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+      const sx = Math.min(bx * 4 + x, w - 1), sy = Math.min(by * 4 + y, h - 1);
+      al.push(rgba[(sy * w + sx) * 4 + 3]);
+    }
+    const a0 = Math.max(...al), a1 = Math.min(...al);
+    const pal = [a0, a1];
+    for (let i = 1; i < 7; i++) pal.push(((7 - i) * a0 + i * a1) / 7);
+    let bits = 0n;
+    for (let i = 0; i < 16; i++) {
+      let best = 0, bd = 1e9;
+      for (let k = 0; k < 8; k++) { const d = Math.abs(al[i] - pal[k]); if (d < bd) { bd = d; best = k; } }
+      bits |= BigInt(a0 === a1 ? 0 : best) << BigInt(3 * i);
+    }
+    const o = b * 16;
+    out[o] = a0; out[o + 1] = a1;
+    for (let i = 0; i < 6; i++) out[o + 2 + i] = Number((bits >> BigInt(8 * i)) & 0xffn);
+    out.set(color.subarray(b * 8, b * 8 + 8), o + 8);
+  }
+  return out;
+}
+// 縮小一半（2×2 平均），產生下一層 mipmap
+function halfSize(rgba, w, h) {
+  const nw = Math.max(1, w >> 1), nh = Math.max(1, h >> 1);
+  const out = new Uint8ClampedArray(nw * nh * 4);
+  for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+    for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+        const sx = Math.min(x * 2 + dx, w - 1), sy = Math.min(y * 2 + dy, h - 1);
+        sum += rgba[(sy * w + sx) * 4 + c];
+      }
+      out[(y * nw + x) * 4 + c] = (sum + 2) >> 2;
+    }
+  }
+  return { rgba: out, w: nw, h: nh };
+}
+function makeDDS(rgba, w, h, opt = {}) {
+  const dxt5 = !!opt.dxt5;
+  const encode = dxt5 ? encodeDXT5 : encodeDXT1;
+  const levels = [];
+  let cur = { rgba, w, h };
+  const full = Math.floor(Math.log2(Math.max(w, h))) + 1;
+  const maxLevels = opt.mipmaps > 1 ? Math.min(opt.mipmaps, full) : 1;   // 層數跟原檔一樣
+  for (let i = 0; i < maxLevels; i++) {
+    levels.push(encode(cur.rgba, cur.w, cur.h));
+    if (cur.w === 1 && cur.h === 1) break;
+    cur = halfSize(cur.rgba, cur.w, cur.h);
+  }
   const header = new ArrayBuffer(128);
   const dv = new DataView(header);
+  const mips = levels.length > 1;
   dv.setUint32(0, 0x20534444, true);
   dv.setUint32(4, 124, true);
-  dv.setUint32(8, 0x00081007, true);
+  dv.setUint32(8, 0x00081007 | (mips ? 0x20000 : 0), true);   // + MIPMAPCOUNT
   dv.setUint32(12, h, true);
   dv.setUint32(16, w, true);
-  dv.setUint32(20, body.length, true);
+  dv.setUint32(20, levels[0].length, true);
+  dv.setUint32(28, levels.length, true);
   dv.setUint32(76, 32, true);
   dv.setUint32(80, 0x4, true);
-  dv.setUint32(84, 0x31545844, true);
-  dv.setUint32(108, 0x1000, true);
-  return new Blob([header, body], { type: 'application/octet-stream' });
+  dv.setUint32(84, dxt5 ? 0x35545844 : 0x31545844, true);      // 'DXT5' / 'DXT1'
+  dv.setUint32(108, 0x1000 | (mips ? 0x400008 : 0), true);      // TEXTURE + COMPLEX|MIPMAP
+  return new Blob([header, ...levels], { type: 'application/octet-stream' });
 }
 
 /* ============ 應用程式狀態 ============ */
@@ -285,6 +346,7 @@ const cctx = composed.getContext('2d');
 let baseCanvas = null;
 let imgW = 0, imgH = 0;
 let fileBase = '';
+let srcFormat = null;    // 原始 DDS 的格式資訊，匯出時沿用
 let zones = [];   // {x,y,w,h,text,size,color,bg,fill,mirror,rot,spacing,auto,cls}
 let selIdx = -1;
 let zoom = 1, panX = 0, panY = 0;
@@ -296,22 +358,28 @@ function compose() {
   if (!baseCanvas) return;
   cctx.clearRect(0, 0, imgW, imgH);
   cctx.drawImage(baseCanvas, 0, 0);
+  // 先畫所有底色、再畫所有文字：框互相重疊時，後面的底色才不會蓋掉前面的新字
   for (const z of zones) {
-    if (z.fill) { cctx.fillStyle = z.bg; cctx.fillRect(z.x, z.y, z.w, z.h); }
+    if (!z.fill) continue;
+    if (z.erase) cctx.drawImage(eraseCanvas(z), z.erase.x, z.erase.y);
+    else { cctx.fillStyle = z.bg; cctx.fillRect(z.x, z.y, z.w, z.h); }
+  }
+  for (const z of zones) {
     if (!z.text) continue;
     cctx.save();
     cctx.translate(z.x + z.w / 2, z.y + z.h / 2);
+    // 傾斜是貼圖上看到的角度，先套用；正值＝右邊高（畫布座標 y 向下，所以取負）
+    if (z.tilt) cctx.rotate(-z.tilt * Math.PI / 180);
     if (z.mirror) cctx.scale(-1, 1);
-    // 傾斜正值＝右邊高（畫布座標 y 向下，所以取負）
-    const rotDeg = (z.rot || 0) - (z.tilt || 0);
-    if (rotDeg) cctx.rotate(rotDeg * Math.PI / 180);
+    if (z.rot) cctx.rotate(z.rot * Math.PI / 180);
     cctx.font = fontFor(z.text, z.size);
     cctx.letterSpacing = (z.spacing || 0) + 'px';
     cctx.fillStyle = z.color;
     cctx.textAlign = 'center';
-    cctx.textBaseline = 'middle';
-    // letterSpacing 會加在最後一個字後面，置中時往左補回一半
-    cctx.fillText(z.text, (z.spacing || 0) / 2, 0);
+    cctx.textBaseline = 'alphabetic';
+    const tm = cctx.measureText(z.text);
+    // 依實際筆畫範圍垂直置中；letterSpacing 會加在最後一個字後面，置中時往左補回一半
+    cctx.fillText(z.text, (z.spacing || 0) / 2, (tm.actualBoundingBoxAscent - tm.actualBoundingBoxDescent) / 2);
     cctx.letterSpacing = '0px';
     cctx.restore();
   }
@@ -365,11 +433,12 @@ function detectTextLines() {
   // 連通元件（8 方向）
   const label = new Int32Array(N);
   const stack = new Int32Array(N);
-  const comps = [];
+  const comps = [], allComps = [];
+  let nextId = 0;
   for (let start = 0; start < N; start++) {
     const t = ink[start];
     if (!t || label[start]) continue;
-    const id = comps.length + 1;
+    const id = ++nextId;
     let sp = 0; stack[sp++] = start; label[start] = id;
     let minx = imgW, miny = imgH, maxx = 0, maxy = 0, area = 0, sr = 0, sg = 0, sb = 0;
     while (sp > 0) {
@@ -387,6 +456,7 @@ function detectTextLines() {
       }
     }
     const w = maxx - minx + 1, h = maxy - miny + 1;
+    allComps.push({ id, t, x: minx, y: miny, w, h });
     // 過濾：太小＝雜點、太大＝車身色塊、貼邊＝背景
     // （門檻放寬：筆畫碎片（如「三」的橫畫）也要留下來，之後會併回同一個字）
     if (w < 4 || h < 4 || w > 700 || h > 700 || area < 12 || area > 250000) continue;
@@ -394,7 +464,7 @@ function detectTextLines() {
     const fill = area / (w * h);
     if (fill < 0.05) continue;
     if (fill > 0.92 && area > 2000) continue;  // 大又全實心＝色塊，不是字
-    comps.push({ t, x: minx, y: miny, w, h, area,
+    comps.push({ id, t, x: minx, y: miny, w, h, area,
       color: [sr / area | 0, sg / area | 0, sb / area | 0] });
   }
   // 併成「行」：同色系、與行內上一個字垂直接近、水平距離近（用上一個字比對可以支援傾斜的文字）
@@ -424,10 +494,17 @@ function detectTextLines() {
   const out = [];
   for (const L of lines) {
     if (L.comps.length < 2) continue;
-    // 把 X 範圍重疊的元件合併成「字」（處理「三」這種分離筆畫）
+    // 把 X 範圍重疊、或間距極小的元件合併成「字」
+    // （處理「三」這種分離筆畫，以及鏤空字體的數字被切成兩半的情況）
     const glyphs = [];
     for (const c of L.comps) {
-      let g = glyphs.find(g2 => Math.min(g2.x + g2.w, c.x + c.w) - Math.max(g2.x, c.x) > Math.min(g2.w, c.w) * 0.3);
+      let g = glyphs.find(g2 => {
+        const ov = Math.min(g2.x + g2.w, c.x + c.w) - Math.max(g2.x, c.x);
+        if (ov > Math.min(g2.w, c.w) * 0.3) return true;
+        const gap = c.x - (g2.x + g2.w);
+        const newW = Math.max(g2.x + g2.w, c.x + c.w) - Math.min(g2.x, c.x);
+        return gap >= 0 && gap < L.gh * 0.1 && newW <= L.gh * 1.25;
+      });
       if (g) {
         const x2 = Math.max(g.x + g.w, c.x + c.w), y2 = Math.max(g.y + g.h, c.y + c.h);
         g.x = Math.min(g.x, c.x); g.y = Math.min(g.y, c.y);
@@ -467,6 +544,7 @@ function detectTextLines() {
     }
     out.push({
       x: x0, y: y0, w: x1 - x0, h: y1 - y0, glyphs: mains, gh, aspect, t: L.t, tilt,
+      compIds: L.comps.map(c => c.id),
       color: rgbHex(cr / ca | 0, cg / ca | 0, cb / ca | 0)
     });
   }
@@ -482,7 +560,7 @@ function detectTextLines() {
     });
     if (!nested) kept.push(L);
   }
-  return { lines: kept, ink };
+  return { lines: kept, ink, label, allComps };
 }
 function rgbHex(r, g, b) {
   return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
@@ -541,14 +619,15 @@ function normalizeVec(v) {
   return v;
 }
 function cosSim(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
-// 把來源畫布的某區域等比縮放置中到 20×20
-function squareMask(src, sx, sy, sw, sh, flip) {
+// 把來源畫布的某區域等比縮放置中到 20×20；xf: undefined=正常 'flipX'=左右翻 'rot180'=轉180度
+function squareMask(src, sx, sy, sw, sh, xf) {
   const c = document.createElement('canvas');
   c.width = TSZ; c.height = TSZ;
   const g = c.getContext('2d');
   const s = Math.min(TSZ / sw, TSZ / sh);
   const dw = sw * s, dh = sh * s;
-  if (flip) { g.translate(TSZ, 0); g.scale(-1, 1); }
+  if (xf === 'flipX') { g.translate(TSZ, 0); g.scale(-1, 1); }
+  else if (xf === 'rot180') { g.translate(TSZ, TSZ); g.scale(-1, -1); }
   g.drawImage(src, sx, sy, sw, sh, (TSZ - dw) / 2, (TSZ - dh) / 2, dw, dh);
   const d = g.getImageData(0, 0, TSZ, TSZ).data;
   const v = new Float64Array(TSZ * TSZ);
@@ -570,35 +649,297 @@ function lineInkCanvas(ink, L) {
   c.getContext('2d').putImageData(img, 0, 0);
   return c;
 }
-function glyphMask(inkCv, L, g, flip) {
-  return squareMask(inkCv, g.x - L.x, g.y - L.y, g.w, g.h, flip);
+function glyphMask(inkCv, L, g, xf) {
+  return squareMask(inkCv, g.x - L.x, g.y - L.y, g.w, g.h, xf);
 }
-// 單一字元的標準字形（中文標楷體／數字 Arial Black），有快取。
+// 單一字元的標準字形模板。不同塗裝會用不同字型（標楷體、黑體、明體、鏤空數字…），
+// 所以每個字用多種常見字型各做一份模板，比對時取最像的那份。
 // 模板用「跟舊字相同的像素大小」渲染：小字會糊，模板也要一樣糊，比對才公平
 const _tpl = {};
-function charTemplate(ch, px) {
+const TPL_FONTS_CJK = [
+  '{s}px "DFKai-SB","標楷體","KaiTi"',
+  '{s}px "Microsoft JhengHei"',
+  'bold {s}px "Microsoft JhengHei"',
+  '{s}px "PMingLiU","MingLiU"',
+];
+const TPL_FONTS_NUM = [
+  '900 {s}px "Arial Black",Arial',
+  'bold {s}px "Microsoft JhengHei"',
+  '{s}px Impact',
+  'bold {s}px Arial',
+];
+function charTemplates(ch, px) {
   const b = Math.max(10, Math.min(140, Math.round(px / 2) * 2));
   const key = ch + '@' + b;
   if (_tpl[key] !== undefined) return _tpl[key];
-  const isNum = /[0-9]/.test(ch);
+  const fonts = /[0-9]/.test(ch) ? TPL_FONTS_NUM : TPL_FONTS_CJK;
   const W = b * 2 + 20;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = W;
-  const g = c.getContext('2d');
-  g.font = isNum ? '900 ' + b + 'px ' + NUMFONT : b + 'px ' + FONT;
-  g.textBaseline = 'middle';
-  g.fillText(ch, 10, W / 2);
-  const d = g.getImageData(0, 0, W, W).data;
-  let x0 = W, x1 = 0, y0 = W, y1 = 0;
-  for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-    if (d[(y * W + x) * 4 + 3] > 30) {
-      if (x < x0) x0 = x; if (x > x1) x1 = x;
-      if (y < y0) y0 = y; if (y > y1) y1 = y;
+  const out = [];
+  for (const f of fonts) {
+    const c = document.createElement('canvas');
+    c.width = W; c.height = W;
+    const g = c.getContext('2d');
+    g.font = f.replace('{s}', b);
+    g.textBaseline = 'middle';
+    g.fillText(ch, 10, W / 2);
+    const d = g.getImageData(0, 0, W, W).data;
+    let x0 = W, x1 = 0, y0 = W, y1 = 0;
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      if (d[(y * W + x) * 4 + 3] > 30) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
     }
+    if (x1 > x0) out.push(squareMask(c, x0, y0, x1 - x0 + 1, y1 - y0 + 1, undefined));
   }
-  return _tpl[key] = x1 > x0 ? squareMask(c, x0, y0, x1 - x0 + 1, y1 - y0 + 1, false) : null;
+  // 方塊造型數字（車頂常見的七段顯示器風格），用程式畫出窄、寬兩種比例
+  if (/[0-9]/.test(ch)) for (const wr of [0.65, 1.0]) for (const th of [0.2, 0.28]) out.push(blockDigitTemplate(ch, wr, th));
+  return _tpl[key] = out.length ? out : null;
+}
+const SEGS = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd',
+  6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcdfg' };
+function blockDigitTemplate(ch, wr, th) {
+  const H = 100, Wd = Math.round(H * wr), t = Math.round(H * th);
+  const c = document.createElement('canvas');
+  c.width = Wd; c.height = H;
+  const g = c.getContext('2d');
+  const R = {
+    a: [0, 0, Wd, t], d: [0, H - t, Wd, t], g: [0, (H - t) / 2, Wd, t],
+    f: [0, 0, t, H / 2], b: [Wd - t, 0, t, H / 2],
+    e: [0, H / 2, t, H / 2], c: [Wd - t, H / 2, t, H / 2],
+  };
+  for (const s of SEGS[ch]) g.fillRect(...R[s]);
+  // 只有右側筆畫的 1 要裁到實際墨水範圍
+  const x0 = ch === '1' ? Wd - t : 0;
+  return squareMask(c, x0, 0, Wd - x0, H, undefined);
+}
+// 一個字跟某字元的相似度 = 與該字元各字型模板的最高分
+function charSim(mask, ch, px) {
+  const tpls = charTemplates(ch, px);
+  if (!tpls) return -1;
+  let best = -1;
+  for (const t of tpls) best = Math.max(best, cosSim(mask, t));
+  return best;
+}
+// 3×3 膨脹：把鏤空字體的切縫補平再比對
+function dilateMask(v) {
+  const out = new Float64Array(TSZ * TSZ);
+  for (let y = 0; y < TSZ; y++) for (let x = 0; x < TSZ; x++) {
+    let m = -Infinity;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const ny = y + dy, nx = x + dx;
+      if (ny < 0 || nx < 0 || ny >= TSZ || nx >= TSZ) continue;
+      const u = v[ny * TSZ + nx];
+      if (u > m) m = u;
+    }
+    out[y * TSZ + x] = m;
+  }
+  return normalizeVec(out);
 }
 
+// 車頂簡稱：臺北市政府警察局→北市、新北市政府警察局→新北、南投縣政府警察局→南投；中正第一分局→中正一、大安分局→大安
+function autoRegionAbbr(region) {
+  if (!region) return '';
+  const r = region.replace(/(政府)?警察局$/, '');
+  if (/^[臺台]/.test(r) && r.length === 3) return r.slice(1);
+  return r.replace(/[市縣]$/, '');
+}
+function autoBranchAbbr(branch) {
+  if (!branch) return '';
+  const b = branch.replace(/分局$/, '');
+  return /^第.$/.test(b) ? b : b.replace('第', '');
+}
+// 塗銷遮罩：只涵蓋舊字的筆畫像素並往外擴幾格（蓋掉抗鋸齒邊緣），
+// 不像整個矩形塗色會蓋到旁邊的車身色塊。以 RLE 存，才能存進 localStorage
+function buildEraseMask(L, label, allComps) {
+  const r = Math.max(2, Math.round(L.gh * 0.06));
+  const x0 = Math.max(0, L.x - r), y0 = Math.max(0, L.y - r);
+  const x1 = Math.min(imgW, L.x + L.w + r), y1 = Math.min(imgH, L.y + L.h + r);
+  const w = x1 - x0, h = y1 - y0;
+  // 這一行自己的筆畫，加上「完整落在這一行範圍內」的同色碎筆畫（點、短撇常被分到別組）
+  const ids = new Set(L.compIds);
+  const m2 = Math.round(L.gh * 0.2);
+  for (const c of allComps) {
+    if (c.t === L.t && c.x >= L.x - m2 && c.y >= L.y - m2 &&
+        c.x + c.w <= L.x + L.w + m2 && c.y + c.h <= L.y + L.h + m2) ids.add(c.id);
+  }
+  let m = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (ids.has(label[(y0 + y) * imgW + x0 + x])) m[y * w + x] = 1;
+  }
+  // 方形膨脹（先橫向再縱向）
+  const tmp = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let last = -1e9;
+    for (let x = 0; x < w; x++) { if (m[y * w + x]) last = x; if (x - last <= r) tmp[y * w + x] = 1; }
+    last = 1e9;
+    for (let x = w - 1; x >= 0; x--) { if (m[y * w + x]) last = x; if (last - x <= r) tmp[y * w + x] = 1; }
+  }
+  m = new Uint8Array(w * h);
+  for (let x = 0; x < w; x++) {
+    let last = -1e9;
+    for (let y = 0; y < h; y++) { if (tmp[y * w + x]) last = y; if (y - last <= r) m[y * w + x] = 1; }
+    last = 1e9;
+    for (let y = h - 1; y >= 0; y--) { if (tmp[y * w + x]) last = y; if (last - y <= r) m[y * w + x] = 1; }
+  }
+  const rle = [];
+  let cur = 0, run = 0;
+  for (let i = 0; i < m.length; i++) {
+    if (m[i] === cur) run++;
+    else { rle.push(run); cur = m[i]; run = 1; }
+  }
+  rle.push(run);
+  return { x: x0, y: y0, w, h, rle };
+}
+const _eraseCache = new WeakMap();
+function eraseCanvas(z) {
+  const e = z.erase;
+  let c = _eraseCache.get(z);
+  if (c && c._bg === z.bg) return c;
+  c = document.createElement('canvas');
+  c.width = e.w; c.height = e.h;
+  const g = c.getContext('2d');
+  const img = g.createImageData(e.w, e.h);
+  const hex = z.bg.replace('#', '');
+  const R = parseInt(hex.slice(0, 2), 16), G = parseInt(hex.slice(2, 4), 16), B = parseInt(hex.slice(4, 6), 16);
+  let p = 0, v = 0;
+  for (const run of e.rle) {
+    if (v) for (let i = p; i < p + run; i++) {
+      img.data[i * 4] = R; img.data[i * 4 + 1] = G; img.data[i * 4 + 2] = B; img.data[i * 4 + 3] = 255;
+    }
+    p += run; v ^= 1;
+  }
+  g.putImageData(img, 0, 0);
+  c._bg = z.bg;
+  _eraseCache.set(z, c);
+  return c;
+}
+// 舊文字的字距：相鄰完整字的中心距離取中位數（拆成兩半的字如「北」不列入）；量不到回傳 0
+function linePitch(L, glyphs) {
+  const full = [...glyphs].filter(g => Math.max(g.w, g.h) >= L.gh * 0.6).sort((a, b) => a.x - b.x);
+  const d = [];
+  for (let i = 1; i < full.length; i++) d.push((full[i].x + full[i].w / 2) - (full[i - 1].x + full[i - 1].w / 2));
+  if (d.length < 2) return 0;
+  d.sort((a, b) => a - b);
+  const med = d[d.length >> 1];
+  // 中心距要像「一個字的寬度」才可信（太小代表字被切碎）
+  return med >= L.gh * 0.6 ? med : 0;
+}
+// 文字所在區域是否為「乾淨的平面」：行範圍內的像素幾乎都是底色或字色才算。
+// 車身線稿、漸層、參考照片上的雜訊會被這關擋掉
+function lineCleanliness(L) {
+  const d = baseCanvas.getContext('2d').getImageData(L.x, L.y, L.w, L.h).data;
+  const hx = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const bg = hx(sampleBg(L)), fg = hx(L.color);
+  const dist = (o, c) => Math.abs(d[o] - c[0]) + Math.abs(d[o + 1] - c[1]) + Math.abs(d[o + 2] - c[2]);
+  let good = 0, tot = 0;
+  for (let i = 0; i < d.length; i += 8) {   // 隔一個像素取樣
+    tot++;
+    if (dist(i, bg) < 60 || dist(i, fg) < 90) good++;
+  }
+  return tot ? good / tot : 0;
+}
+// 中文字大致是方塊：把相鄰、合起來仍不超過一個字寬的碎塊（如左右分開的「北」）合併回一個字
+function cjkGlyphs(L, ink) {
+  const src = [...L.glyphs].sort((a, b) => a.x - b.x);
+  const out = [];
+  for (const g of src) {
+    const cur = out[out.length - 1];
+    if (cur && g.x - (cur.x + cur.w) < L.gh * 0.25 && Math.max(cur.x + cur.w, g.x + g.w) - cur.x <= L.gh * 1.1) {
+      const x2 = Math.max(cur.x + cur.w, g.x + g.w), y2 = Math.max(cur.y + cur.h, g.y + g.h);
+      cur.y = Math.min(cur.y, g.y); cur.w = x2 - cur.x; cur.h = y2 - cur.y;
+    } else out.push({ x: g.x, y: g.y, w: g.w, h: g.h });
+  }
+  // 每個字的上下範圍改由該欄實際筆畫決定（被過濾掉的小筆畫如「宀」也算進來）
+  if (ink) for (const g of out) {
+    let y0 = -1, y1 = -1;
+    for (let y = L.y; y < L.y + L.h; y++) {
+      for (let x = g.x; x < g.x + g.w; x++) if (ink[y * imgW + x] === L.t) { if (y0 < 0) y0 = y; y1 = y; break; }
+    }
+    if (y0 >= 0) { g.y = y0; g.h = y1 - y0 + 1; }
+  }
+  return out;
+}
+// 一行文字對各欄位的評分。回傳候選清單：{ cls, text, mode, score, ok }
+function scoreLine(L, ink, fieldList) {
+  const inkCv = lineInkCanvas(ink, L);
+  const glNum = [...L.glyphs].sort((a, b) => a.x - b.x);
+  const glCjk = cjkGlyphs(L, ink);
+  let gl = glNum, n = gl.length;
+  const clean = lineCleanliness(L);
+  const cands = [];
+  // 小字的抗鋸齒邊緣占比高，門檻放寬
+  if (clean < (L.gh < 30 ? 0.7 : 0.8)) return cands;
+  // 太小的字不是車身標示（說明文字、雜點）：中文至少圖高 0.6%、編號至少 1%
+  const minCjk = imgH * 0.006, minNum = imgH * 0.01;
+  // idxs 位置的字跟 chars 模板逐一比對，回傳平均與最高相似度
+  const seq = (idxs, chars, xf) => {
+    let s = 0, mx = -1;
+    for (let i = 0; i < chars.length; i++) {
+      const g = gl[idxs[i]];
+      if (!g) return null;
+      const v = charSim(glyphMask(inkCv, L, g, xf), chars[i], g.h);
+      if (v < 0) return null;
+      s += v; if (v > mx) mx = v;
+    }
+    return { avg: s / chars.length, mx };
+  };
+  const bestDigit = (m, px) => {
+    const md = dilateMask(m);
+    let b = -1;
+    for (const d of '0123456789') b = Math.max(b, charSim(m, d, px), charSim(md, d, px));
+    return b;
+  };
+  for (const [cls, text] of fieldList) {
+    const isNum = /^[0-9 ]+$/.test(text);
+    if (isNum) {
+      if (L.gh < minNum) continue;
+      gl = glNum; n = gl.length;
+      const numLen = text.replace(/\s/g, '').length;
+      // 同一組編號的每一位數字高度、上緣都差不多
+      const hs = gl.map(g => g.h), tops = gl.map(g => g.y);
+      const evenH = Math.min(...hs) >= Math.max(...hs) * 0.8;
+      const evenTop = Math.max(...tops) - Math.min(...tops) <= L.gh * 0.25 + Math.abs(L.tilt || 0) * L.w / 57;
+      for (const xf of [undefined, 'rot180']) {          // 車頂編號常旋轉 180 度
+        const mode = xf === 'rot180' ? 'rot180' : 'normal';
+        // 路徑1：依切出來的字塊比對（字塊數要接近位數）
+        if (n <= 6 && Math.abs(n - numLen) <= 1 && evenH && evenTop) {
+          const sc = gl.map(g => bestDigit(glyphMask(inkCv, L, g, xf), g.h));
+          const avg = sc.reduce((a, b) => a + b, 0) / n;
+          cands.push({ cls, text, mode, score: avg, ok: avg >= 0.6 && Math.min(...sc) >= 0.45 });
+        }
+        // 路徑2：整行等寬切成位數格比對（鏤空字體把數字切碎時用這條），要求更嚴
+        if (n <= numLen * 2 + 1) {
+          const sc = [];
+          for (let i = 0; i < numLen; i++) sc.push(bestDigit(squareMask(inkCv, L.w * i / numLen, 0, L.w / numLen, L.h, xf), L.h));
+          const avg = sc.reduce((a, b) => a + b, 0) / numLen;
+          cands.push({ cls, text, mode, score: avg, ok: avg >= 0.68 && Math.min(...sc) >= 0.5 });
+        }
+      }
+    } else {
+      if (L.gh < minCjk) continue;
+      gl = glCjk; n = gl.length;
+      const chars = [...text.replace(/\s/g, '')];
+      // 錨點只用「不會變動的結尾」：警察局 3 字、其他取最後 2 字（如 分局），
+      // 避免會換掉的字（第→安）拖低平均分
+      const k = text.endsWith('警察局') ? 3 : Math.min(2, chars.length);
+      if (n < k) continue;
+      const anchor = chars.slice(-k);
+      const anchorR = [...anchor].reverse();
+      const lastIdx = Array.from({ length: k }, (_, i) => n - k + i);
+      const firstIdx = Array.from({ length: k }, (_, i) => i);
+      // 中文容許跨字型差異：平均 0.40 即可，但至少要有一個字很像（≥0.55）
+      const add = (mode, textOut, r) => {
+        if (r) cands.push({ cls, text: textOut, mode, score: r.avg, ok: r.avg >= 0.40 && r.mx >= 0.55 });
+      };
+      add('normal', text, seq(lastIdx, anchor, undefined));
+      add('rtl', [...text].reverse().join(''), seq(firstIdx, anchorR, undefined));
+      add('mirror', text, seq(firstIdx, anchorR, 'flipX'));
+      add('rot180', text, seq(firstIdx, anchorR, 'rot180'));
+    }
+  }
+  return cands;
+}
 // 主流程：偵測 → 分類 → 依欄位內容產生文字框
 function autoApply() {
   const msg = document.getElementById('autoMsg');
@@ -613,7 +954,7 @@ function autoApply() {
   }
   msg.textContent = '偵測中…'; msg.className = '';
   setTimeout(() => {
-    const { lines, ink } = detectTextLines();
+    const { lines, ink, label, allComps } = detectTextLines();
     // 逐字比對分類：
     //   編號 → 每個字對數字 0–9 模板取最像
     //   中文 → 行尾（或反序時行首）的關鍵字對「新文字結尾幾個字」模板（例：分局、警察局）
@@ -621,75 +962,81 @@ function autoApply() {
       .filter(f => f[1]);
     zones = zones.filter(z => !z.auto);
     const count = { region: 0, branch: 0, num: 0 };
-    const made = [];
-    for (const L of lines) {
-      const inkCv = lineInkCanvas(ink, L);
-      const gl = [...L.glyphs].sort((a, b) => a.x - b.x);
-      const n = gl.length;
-      // idxs 位置的字跟 chars 模板逐一比對，回傳平均相似度
-      const seq = (idxs, chars, flip) => {
-        let s = 0;
-        for (let i = 0; i < chars.length; i++) {
-          const g = gl[idxs[i]];
-          if (!g) return -1;
-          const tpl = charTemplate(chars[i], g.h);
-          if (!tpl) return -1;
-          s += cosSim(glyphMask(inkCv, L, g, flip), tpl);
-        }
-        return s / chars.length;
-      };
-      const cands = [];
-      for (const [cls, text] of fieldList) {
-        const isNum = /^[0-9 ]+$/.test(text);
-        if (isNum) {
-          const numLen = text.replace(/\s/g, '').length;
-          if (n > 6 || Math.abs(n - numLen) > 1) continue;  // 位數差太多就不是編號
-          let s = 0;
-          for (const g of gl) {
-            let b = -1;
-            for (const d of '0123456789') {
-              const tpl = charTemplate(d, g.h);
-              if (tpl) b = Math.max(b, cosSim(glyphMask(inkCv, L, g, false), tpl));
-            }
-            s += b;
-          }
-          cands.push({ cls, text, mode: 'normal', score: s / n, th: 0.55 });
-        } else {
-          const chars = [...text.replace(/\s/g, '')];
-          const k = Math.min(3, chars.length);
-          if (n < k) continue;
-          const anchor = chars.slice(-k);                       // 新文字結尾幾個字（分局、警察局）
-          const anchorR = [...anchor].reverse();
-          const lastIdx = Array.from({ length: k }, (_, i) => n - k + i);
-          const firstIdx = Array.from({ length: k }, (_, i) => i);
-          cands.push({ cls, text, mode: 'normal', score: seq(lastIdx, anchor, false), th: 0.5 });
-          cands.push({ cls, text: [...text].reverse().join(''), mode: 'rtl', score: seq(firstIdx, anchorR, false), th: 0.5 });
-          cands.push({ cls, text, mode: 'mirror', score: seq(firstIdx, anchorR, true), th: 0.5 });
-        }
-      }
-      let best = null;
-      for (const c of cands) if (c.score >= c.th && (!best || c.score > best.score)) best = c;
-      if (!best) continue;  // 不像任何欄位的文字，跳過不動
-      // 字距與大小：讓新文字寬度貼近舊文字寬度
-      best.size = Math.round(L.gh * calibFactor(/^[0-9 ]+$/.test(fields[best.cls]) ? 'num' : 'cjk'));
-      cctx.font = fontFor(best.text, best.size);
-      const natural = cctx.measureText(best.text).width;
-      let spacing = best.text.length > 1 ? (L.w - natural) / (best.text.length - 1) : 0;
-      best.spacing = Math.round(Math.max(0, Math.min(spacing, best.size * 1.6)));
-      best.mirror = best.mode === 'mirror';
-      // 傾斜角度：設定選單有填就用設定值（反序面自動用相反方向），否則沿用原文字量到的角度
+    const made = [], madeLines = [];
+    // 依舊文字那一行 L 產生新文字框：字級、字距、傾斜、底色都跟著舊字
+    const makeZone = (L, cls, text, mode) => {
+      const isNum = /^[0-9 ]+$/.test(text);
+      const size = Math.round(L.gh * calibFactor(isNum ? 'num' : 'cjk'));
+      cctx.font = fontFor(text, size);
+      const natural = cctx.measureText(text).width;
+      let spacing = text.length > 1 ? (L.w - natural) / (text.length - 1) : 0;
+      const pitch = linePitch(L, isNum ? L.glyphs : cjkGlyphs(L));
+      if (pitch && text.length > 1) spacing = pitch - natural / text.length;
+      // 傾斜角度：設定選單有填就用設定值（反序面自動用相反方向），否則沿用原文字量到的角度；車頂組不套用
       const userTilt = parseFloat(document.getElementById('fTilt').value) || 0;
-      const tilt = userTilt !== 0
-        ? (best.mode === 'rtl' ? -userTilt : userTilt)
+      const tilt = userTilt !== 0 && mode !== 'rot180'
+        ? (mode === 'rtl' ? -userTilt : userTilt)
         : (L.tilt || 0);
       const pad = Math.round(L.gh * 0.4);
-      made.push({
+      return {
         x: L.x - pad, y: L.y - pad, w: L.w + pad * 2, h: L.h + pad * 2,
-        text: best.text, size: best.size, color: L.color, bg: sampleBg(L), fill: true,
-        mirror: best.mirror, rot: 0, tilt, spacing: best.spacing, auto: true,
-        cls: best.cls, mode: best.mode
-      });
+        text, size, color: L.color, bg: sampleBg(L), fill: true,
+        mirror: mode === 'mirror', rot: mode === 'rot180' ? 180 : 0,
+        tilt, spacing: Math.round(Math.max(0, Math.min(spacing, size * 1.6))), auto: true,
+        cls, mode, erase: buildEraseMask(L, label, allComps)
+      };
+    };
+    for (const L of lines) {
+      const cands = scoreLine(L, ink, fieldList);
+      let best = null;
+      for (const c of cands) {
+        if (!c.ok) continue;
+        if (!best || c.score > best.score) best = c;
+      }
+      if (!best) continue;  // 不像任何欄位的文字，跳過不動
+      made.push(makeZone(L, best.cls, best.text, best.mode));
+      madeLines.push(L);
       count[best.cls]++;
+    }
+    // 車頂組：車頂通常是「編號＋分局簡稱＋地區簡稱」直向疊在一起。
+    // 找跟編號左右對齊、緊鄰、但還沒被認出來的中文行，依離編號的遠近：最近＝分局簡稱、次近＝地區簡稱。
+    // 正常閱讀是由上往下「地區、分局、編號」，所以編號在最上面＝整組倒轉 180 度。
+    const abbr = {
+      regionAbbr: document.getElementById('fRegionAbbr').value.trim() || autoRegionAbbr(fields.region),
+      branchAbbr: document.getElementById('fBranchAbbr').value.trim() || autoBranchAbbr(fields.branch),
+    };
+    const numCount = made.length;
+    for (let i = 0; i < numCount; i++) {
+      if (made[i].cls !== 'num') continue;
+      const N = madeLines[i];
+      const free = lines.filter(L => !madeLines.includes(L) && L.t === N.t && L.gh >= N.gh * 0.5 && lineCleanliness(L) >= 0.8 &&
+        Math.min(L.x + L.w, N.x + N.w) - Math.max(L.x, N.x) > Math.min(L.w, N.w) * 0.5);
+      const chainDir = dir => {
+        const out = [];
+        let edge = dir > 0 ? N.y + N.h : N.y, gap = N.gh;
+        while (out.length < 2) {
+          const nx = free.filter(L => !out.includes(L))
+            .map(L => ({ L, d: dir > 0 ? L.y - edge : edge - (L.y + L.h) }))
+            .filter(o => o.d > -o.L.gh * 0.3 && o.d < Math.max(gap, o.L.gh) * 1.2)
+            .sort((a, b) => a.d - b.d)[0];
+          if (!nx) break;
+          out.push(nx.L);
+          edge = dir > 0 ? nx.L.y + nx.L.h : nx.L.y; gap = nx.L.gh;
+        }
+        return out;
+      };
+      const below = chainDir(1), above = chainDir(-1);
+      const chain = below.length >= above.length ? below : above;
+      if (!chain.length) continue;
+      const mode = chain === below ? 'rot180' : 'normal';   // 中文在編號下方＝整組倒轉
+      made[i] = makeZone(N, 'num', made[i].text, mode);
+      chain.forEach((L, k) => {
+        const cls = k === 0 ? 'branchAbbr' : 'regionAbbr';
+        if (!abbr[cls]) return;
+        made.push(makeZone(L, cls, abbr[cls], mode));
+        madeLines.push(L);
+        count[cls] = (count[cls] || 0) + 1;
+      });
     }
     zones.push(...made);
     selIdx = -1; syncEditor(); renderList(); refresh();
@@ -697,6 +1044,7 @@ function autoApply() {
     if (count.region) parts.push('地區×' + count.region);
     if (count.branch) parts.push('分局×' + count.branch);
     if (count.num) parts.push('編號×' + count.num);
+    if (count.branchAbbr || count.regionAbbr) parts.push('車頂簡稱×' + ((count.branchAbbr || 0) + (count.regionAbbr || 0)));
     if (parts.length) {
       msg.className = '';
       msg.innerHTML = '已套用：' + parts.join('、') +
@@ -709,7 +1057,7 @@ function autoApply() {
 }
 
 /* ---- 文字框清單 / 編輯面板 ---- */
-const CLS_NAME = { region: '地區', branch: '分局', num: '編號' };
+const CLS_NAME = { region: '地區', branch: '分局', num: '編號', regionAbbr: '車頂地區', branchAbbr: '車頂分局' };
 const listEl = document.getElementById('zoneList');
 function renderList() {
   listEl.innerHTML = '';
@@ -862,6 +1210,8 @@ function loadFile(file) {
           document.getElementById('fBranch').value = saved.fields.branch || '';
           document.getElementById('fNum').value = saved.fields.num || '';
           document.getElementById('fTilt').value = saved.fields.tilt || 0;
+          document.getElementById('fRegionAbbr').value = saved.fields.regionAbbr || '';
+          document.getElementById('fBranchAbbr').value = saved.fields.branchAbbr || '';
         }
       }
     } catch (e) {}
@@ -878,7 +1228,8 @@ function loadFile(file) {
   };
   if (/\.dds$/i.test(name)) {
     file.arrayBuffer().then(ab => {
-      const { width, height, rgba } = parseDDS(ab);
+      const { width, height, rgba, fourcc, mipCount, alphaUsed } = parseDDS(ab);
+      srcFormat = { fourcc, mipCount, alphaUsed };
       const c = document.createElement('canvas');
       c.width = width; c.height = height;
       c.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
@@ -887,6 +1238,7 @@ function loadFile(file) {
   } else {
     const img = new Image();
     img.onload = () => {
+      srcFormat = null;
       const c = document.createElement('canvas');
       c.width = img.width; c.height = img.height;
       c.getContext('2d').drawImage(img, 0, 0);
@@ -913,6 +1265,8 @@ function saveAuto() {
     branch: document.getElementById('fBranch').value,
     num: document.getElementById('fNum').value,
     tilt: document.getElementById('fTilt').value,
+    regionAbbr: document.getElementById('fRegionAbbr').value,
+    branchAbbr: document.getElementById('fBranchAbbr').value,
   };
   try { localStorage.setItem('livery:' + fileBase, JSON.stringify({ zones, fields })); } catch (e) {}
 }
@@ -927,7 +1281,14 @@ document.getElementById('btnExportDDS').onclick = () => {
   if (!baseCanvas) return;
   compose();
   const d = cctx.getImageData(0, 0, imgW, imgH).data;
-  download(makeDDS(d, imgW, imgH), fileBase + '.dds');
+  const fmt = srcFormat || {};
+  const msg = document.getElementById('autoMsg');
+  msg.className = ''; msg.textContent = '匯出中…';
+  setTimeout(() => {
+    download(makeDDS(d, imgW, imgH, { mipmaps: fmt.mipCount || 1, dxt5: !!fmt.alphaUsed }), fileBase + '.dds');
+    msg.textContent = '已匯出 ' + fileBase + '.dds（' + (fmt.alphaUsed ? 'DXT5' : 'DXT1') +
+      (fmt.mipCount > 1 ? '，含 mipmap' : '') + '），在「下載」資料夾。';
+  }, 30);
 };
 document.getElementById('btnExportPNG').onclick = () => {
   if (!baseCanvas) return;
