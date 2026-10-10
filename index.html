@@ -112,6 +112,7 @@
       <input type="number" id="fNumSpVal" min="-20" max="100" step="1" style="width:50px;flex:none"><span style="color:#999;font-size:12px">%</span></div>
     <div id="fontPreview"><span id="pvNum">0123456789</span><span id="pvCjk">桃園市政府警察局</span></div>
     <button id="btnAuto" class="big">自動偵測並套用</button>
+    <button id="btnErase" class="minor" style="width:100%;margin-top:8px">塗掉殘留（在圖上框選）</button>
     <div id="autoMsg">留空的欄位不會修改。<br>按下後會自動找到圖上所有文字（含鏡像面），以相同大小、顏色換成新文字。</div>
 
     <details>
@@ -405,6 +406,8 @@ let fileBase = '';
 let srcFormat = null;    // 原始 DDS 的格式資訊，匯出時沿用
 let zones = [];   // {x,y,w,h,text,size,color,bg,fill,mirror,rot,spacing,auto,cls}
 let selIdx = -1;
+let leftovers = [];      // 套用後沒被換到的疑似文字行（不存檔）
+let _detCache = null;    // 「塗掉殘留」用的偵測結果快取
 let zoom = 1, panX = 0, panY = 0;
 let lastSize = 100;
 let mode = 'normal';
@@ -457,9 +460,14 @@ function render() {
   vctx.translate(panX, panY); vctx.scale(zoom, zoom);
   vctx.drawImage(composed, 0, 0);
   if (document.getElementById('chkFrames').checked) {
+    vctx.lineWidth = 2 / zoom;
+    vctx.setLineDash([6 / zoom, 4 / zoom]);
+    vctx.strokeStyle = 'rgba(255,60,60,.95)';
+    for (const L of leftovers) vctx.strokeRect(L.x - 4, L.y - 4, L.w + 8, L.h + 8);
+    vctx.setLineDash([]);
     vctx.lineWidth = 1.5 / zoom;
     zones.forEach((z, i) => {
-      vctx.strokeStyle = i === selIdx ? '#00e676' : (z.auto ? 'rgba(255,180,60,.9)' : 'rgba(80,150,255,.85)');
+      vctx.strokeStyle = i === selIdx ? '#00e676' : z.cls === 'eraser' ? 'rgba(200,120,255,.9)' : (z.auto ? 'rgba(255,180,60,.9)' : 'rgba(80,150,255,.85)');
       vctx.strokeRect(z.x, z.y, z.w, z.h);
       if (i === selIdx) {
         const s = 10 / zoom;
@@ -478,12 +486,33 @@ function detectTextLines() {
   const d = baseCanvas.getContext('2d').getImageData(0, 0, imgW, imgH).data;
   const N = imgW * imgH;
   const ink = new Uint8Array(N);   // 1=深色字 2=淺色字
+  const lumA = new Uint8Array(N);  // 低彩度像素的亮度；高彩度（徽章等）記 0 不參與
+  const lowSat = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
     const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
     const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
     if (mx - mn < 150) {  // 排除高彩度圖案（黃色徽章等），深紅深藍等有色文字仍可偵測
       const lum = (r * 299 + g * 587 + b * 114) / 1000;
+      lumA[i] = lum; lowSat[i] = 1;
       if (lum < 120) ink[i] = 1; else if (lum > 180) ink[i] = 2;
+    }
+  }
+  // 雙門檻：跟確定的深色筆畫相連的灰色像素也算同一個字。
+  // 細筆畫小字（尤其工具自己寫上去、再經 DDS 壓縮的標楷體）很多筆畫只有灰色，不連回去字會碎掉、整行認不出來；
+  // 也讓塗銷時把字邊的淡灰一起蓋掉。獨立的灰色區域（線稿、漸層）不碰到深色筆畫就不會被算進來
+  {
+    const q = new Int32Array(N);
+    let qh = 0, qt = 0;
+    for (let i = 0; i < N; i++) if (ink[i] === 1) q[qt++] = i;
+    while (qh < qt) {
+      const p = q[qh++];
+      const x = p % imgW, y = (p / imgW) | 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= imgW || ny >= imgH) continue;
+        const n2 = ny * imgW + nx;
+        if (!ink[n2] && lowSat[n2] && lumA[n2] < 185) { ink[n2] = 1; q[qt++] = n2; }
+      }
     }
   }
   // 連通元件（8 方向）
@@ -496,11 +525,13 @@ function detectTextLines() {
     if (!t || label[start]) continue;
     const id = ++nextId;
     let sp = 0; stack[sp++] = start; label[start] = id;
-    let minx = imgW, miny = imgH, maxx = 0, maxy = 0, area = 0, sr = 0, sg = 0, sb = 0;
+    let minx = imgW, miny = imgH, maxx = 0, maxy = 0, area = 0, sr = 0, sg = 0, sb = 0, sc = 0;
     while (sp > 0) {
       const p = stack[--sp];
       const x = p % imgW, y = (p / imgW) | 0;
-      area++; sr += d[p * 4]; sg += d[p * 4 + 1]; sb += d[p * 4 + 2];
+      area++;
+      // 字的顏色只用確定的深色（或淺色）筆畫算，不含連進來的灰色邊緣
+      if (t === 1 ? lumA[p] < 120 : lumA[p] > 180) { sc++; sr += d[p * 4]; sg += d[p * 4 + 1]; sb += d[p * 4 + 2]; }
       if (x < minx) minx = x; if (x > maxx) maxx = x;
       if (y < miny) miny = y; if (y > maxy) maxy = y;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
@@ -521,7 +552,7 @@ function detectTextLines() {
     if (fill < 0.05) continue;
     if (fill > 0.92 && area > 2000) continue;  // 大又全實心＝色塊，不是字
     comps.push({ id, t, x: minx, y: miny, w, h, area,
-      color: [sr / area | 0, sg / area | 0, sb / area | 0] });
+      color: sc ? [sr / sc | 0, sg / sc | 0, sb / sc | 0] : [d[start * 4], d[start * 4 + 1], d[start * 4 + 2]] });
   }
   // 併成「行」：同色系、與行內上一個字垂直接近、水平距離近（用上一個字比對可以支援傾斜的文字）
   comps.sort((a, b) => (a.x - b.x));
@@ -813,11 +844,13 @@ function autoBranchAbbr(branch) {
 function buildEraseMask(L, label, allComps) {
   const r = Math.max(2, Math.round(L.gh * 0.06));
   // 這一行自己的筆畫，加上「完整落在這一行範圍附近」的同色碎筆畫（點、短撇、斜行最低那個字的底橫常被分到別組）
-  const ids = new Set(L.compIds);
+  // 只有字大小的筆畫才算（比一個字高還大的是車窗、色塊等別的東西）
+  const glyphSized = c => c && c.h <= L.gh * 1.6 && c.w <= L.gh * 2.5;
+  const ids = new Set(L.compIds.filter(id => glyphSized(allComps[id - 1])));
   const m2 = Math.round(L.gh * 0.2);
   let bx0 = L.x, by0 = L.y, bx1 = L.x + L.w, by1 = L.y + L.h;
   for (const c of allComps) {
-    if (c.t === L.t && c.x >= L.x - m2 && c.y >= L.y - m2 &&
+    if (c.t === L.t && glyphSized(c) && c.x >= L.x - m2 && c.y >= L.y - m2 &&
         c.x + c.w <= L.x + L.w + m2 && c.y + c.h <= L.y + L.h + m2) {
       ids.add(c.id);
       bx0 = Math.min(bx0, c.x); by0 = Math.min(by0, c.y);
@@ -828,9 +861,37 @@ function buildEraseMask(L, label, allComps) {
   const x0 = Math.max(0, bx0 - r), y0 = Math.max(0, by0 - r);
   const x1 = Math.min(imgW, bx1 + r), y1 = Math.min(imgH, by1 + r);
   const w = x1 - x0, h = y1 - y0;
+  // 「跟字同類」（深色字→深色物件，如車身）的別的物件：塗銷時要保護；相反類的是底色本身，照塗
+  const other = l => l && !ids.has(l) && allComps[l - 1] && allComps[l - 1].t === L.t;
   let m = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (ids.has(label[(y0 + y) * imgW + x0 + x])) m[y * w + x] = 1;
+  }
+  // 行範圍內「不屬於任何物件」但跟底色明顯不同的低彩度像素也塗掉：
+  // 壓縮後只剩淺灰的細筆畫、字邊殘影、雜點都在這裡。屬於別的物件（車身、別行字）或彩色（警徽）的不碰
+  {
+    const hx = sampleBg(L).replace('#', '');
+    const bg = [0, 2, 4].map(i => parseInt(hx.slice(i, i + 2), 16));
+    const src = baseCanvas.getContext('2d').getImageData(x0, y0, w, h).data;
+    const lx0 = L.x - r, ly0 = L.y - r, lx1 = L.x + L.w + r, ly1 = L.y + L.h + r;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const gx = x0 + x, gy = y0 + y;
+      if (gx < lx0 || gx >= lx1 || gy < ly0 || gy >= ly1) continue;
+      const lab = label[gy * imgW + gx];
+      if (other(lab)) continue;
+      // 緊貼同類物件（車身）的淡色邊緣屬於那個物件，不能削掉
+      let touchesOther = false;
+      for (let dy = -1; dy <= 1 && !touchesOther; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = gx + dx, ny = gy + dy;
+        if (nx < 0 || ny < 0 || nx >= imgW || ny >= imgH) continue;
+        if (other(label[ny * imgW + nx])) { touchesOther = true; break; }
+      }
+      if (touchesOther) continue;
+      const o = (y * w + x) * 4;
+      const R = src[o], G = src[o + 1], B = src[o + 2];
+      if (Math.max(R, G, B) - Math.min(R, G, B) > 90) continue;
+      if (Math.abs(R - bg[0]) + Math.abs(G - bg[1]) + Math.abs(B - bg[2]) > 36) m[y * w + x] = 1;
+    }
   }
   // 方形膨脹（先橫向再縱向）
   const tmp = new Uint8Array(w * h);
@@ -846,6 +907,10 @@ function buildEraseMask(L, label, allComps) {
     for (let y = 0; y < h; y++) { if (tmp[y * w + x]) last = y; if (y - last <= r) m[y * w + x] = 1; }
     last = 1e9;
     for (let y = h - 1; y >= 0; y--) { if (tmp[y * w + x]) last = y; if (last - y <= r) m[y * w + x] = 1; }
+  }
+  // 往外擴的時候不能蓋進同類的其他物件（車身、別行字）
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (m[y * w + x] && other(label[(y0 + y) * imgW + x0 + x])) m[y * w + x] = 0;
   }
   const rle = [];
   let cur = 0, run = 0;
@@ -878,6 +943,68 @@ function eraseCanvas(z) {
   c._bg = z.bg;
   _eraseCache.set(z, c);
   return c;
+}
+function detForErase() {
+  if (!_detCache || _detCache.canvas !== baseCanvas) _detCache = { canvas: baseCanvas, det: detectTextLines() };
+  return _detCache.det;
+}
+function rectBg(x0, y0, w, h) {
+  const g = baseCanvas.getContext('2d');
+  const counts = {};
+  const take = (x, y) => {
+    if (x < 0 || y < 0 || x >= imgW || y >= imgH) return;
+    const p = g.getImageData(x, y, 1, 1).data;
+    const k = ((p[0] >> 4) << 8) | ((p[1] >> 4) << 4) | (p[2] >> 4);
+    const c = counts[k] = counts[k] || { n: 0, r: 0, g: 0, b: 0 };
+    c.n++; c.r += p[0]; c.g += p[1]; c.b += p[2];
+  };
+  const step = Math.max(1, Math.round((w + h) / 80));
+  for (let x = x0; x < x0 + w; x += step) { take(x, y0); take(x, y0 + h - 1); }
+  for (let y = y0; y < y0 + h; y += step) { take(x0, y); take(x0 + w - 1, y); }
+  let best = null;
+  for (const k in counts) if (!best || counts[k].n > best.n) best = counts[k];
+  return best ? rgbHex(best.r / best.n | 0, best.g / best.n | 0, best.b / best.n | 0) : '#ffffff';
+}
+function buildRectErase(z) {
+  const x0 = Math.max(0, Math.round(z.x)), y0 = Math.max(0, Math.round(z.y));
+  const w = Math.min(imgW - x0, Math.round(z.w)), h = Math.min(imgH - y0, Math.round(z.h));
+  if (w < 2 || h < 2) return null;
+  const { label, allComps } = detForErase();
+  z.bg = rectBg(x0, y0, w, h);
+  const hx = z.bg.replace('#', '');
+  const bg = [0, 2, 4].map(i => parseInt(hx.slice(i, i + 2), 16));
+  // 延伸到框外很遠的物件（車身、大色塊）不是殘留
+  const huge = l => { const c = l && allComps[l - 1]; return c && (c.x < x0 - w * 0.25 || c.y < y0 - h * 0.25 || c.x + c.w > x0 + w * 1.25 || c.y + c.h > y0 + h * 1.25); };
+  const src = baseCanvas.getContext('2d').getImageData(x0, y0, w, h).data;
+  // 跟底色同類的大物件就是底色本身，照塗；跟底色不同類的大物件（車身）不碰
+  const bgLight = bg[0] + bg[1] + bg[2] > 384;
+  const keep = (x, y) => { const lab = label[(y0 + y) * imgW + x0 + x]; return huge(lab) && allComps[lab - 1].t !== (bgLight ? 2 : 1); };
+  let m = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const o = (y * w + x) * 4;
+    const R = src[o], G = src[o + 1], B = src[o + 2];
+    if (Math.max(R, G, B) - Math.min(R, G, B) > 90) continue;           // 彩色（警徽）不碰
+    if (Math.abs(R - bg[0]) + Math.abs(G - bg[1]) + Math.abs(B - bg[2]) <= 36) continue;
+    if (keep(x, y)) continue;
+    m[y * w + x] = 1;
+  }
+  // 往外擴 1 格蓋掉邊緣
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (!m[y * w + x]) continue;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < w && ny < h && !keep(nx, ny)) out[ny * w + nx] = 1;
+    }
+  }
+  const rle = [];
+  let cur = 0, run = 0;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === cur) run++;
+    else { rle.push(run); cur = out[i]; run = 1; }
+  }
+  rle.push(run);
+  return { x: x0, y: y0, w, h, rle };
 }
 // 舊文字的字距：相鄰完整字的中心距離取中位數（拆成兩半的字如「北」不列入）；量不到回傳 0
 function linePitch(L, glyphs) {
@@ -962,24 +1089,24 @@ function scoreLine(L, ink, fieldList) {
     if (isNum) {
       if (L.gh < minNum) continue;
       gl = glNum; n = gl.length;
-      const numLen = text.replace(/\s/g, '').length;
       // 同一組編號的每一位數字高度、上緣都差不多
       const hs = gl.map(g => g.h), tops = gl.map(g => g.y);
       const evenH = Math.min(...hs) >= Math.max(...hs) * 0.8;
       const evenTop = Math.max(...tops) - Math.min(...tops) <= L.gh * 0.25 + Math.abs(L.tilt || 0) * L.w / 57;
       for (const xf of [undefined, 'rot180']) {          // 車頂編號常旋轉 180 度
         const mode = xf === 'rot180' ? 'rot180' : 'normal';
-        // 路徑1：依切出來的字塊比對（字塊數要接近位數）
-        if (n <= 6 && Math.abs(n - numLen) <= 1 && evenH && evenTop) {
+        // 路徑1：依切出來的字塊比對。舊號碼幾位數跟新號碼無關（77 換成 1351 很常見），只看舊字像不像數字
+        if (n >= 2 && n <= 6 && evenH && evenTop) {
           const sc = gl.map(g => bestDigit(glyphMask(inkCv, L, g, xf), g.h));
           const avg = sc.reduce((a, b) => a + b, 0) / n;
           cands.push({ cls, text, mode, score: avg, ok: avg >= 0.6 && Math.min(...sc) >= 0.45 });
         }
-        // 路徑2：整行等寬切成位數格比對（鏤空字體把數字切碎時用這條），要求更嚴
-        if (n <= numLen * 2 + 1) {
+        // 路徑2：整行等寬切成 k 格比對（鏤空字體把一個數字切成兩塊時用這條），要求更嚴。
+        // 舊號碼的位數未知：每個數字最多被切成 2 塊，所以試 ceil(n/2)～n 位
+        for (let k = Math.max(2, Math.ceil(n / 2)); k <= Math.min(6, n); k++) {
           const sc = [];
-          for (let i = 0; i < numLen; i++) sc.push(bestDigit(squareMask(inkCv, L.w * i / numLen, 0, L.w / numLen, L.h, xf), L.h));
-          const avg = sc.reduce((a, b) => a + b, 0) / numLen;
+          for (let i = 0; i < k; i++) sc.push(bestDigit(squareMask(inkCv, L.w * i / k, 0, L.w / k, L.h, xf), L.h));
+          const avg = sc.reduce((a, b) => a + b, 0) / k;
           cands.push({ cls, text, mode, score: avg, ok: avg >= 0.68 && Math.min(...sc) >= 0.5 });
         }
       }
@@ -1109,6 +1236,14 @@ function autoApply() {
       });
     }
     zones.push(...made);
+    // 看起來像字、但沒被換到的行：用紅框提醒（多半是新舊字差太多或特殊字型）
+    const textLike = L => {
+      const hs = L.glyphs.map(g => g.h);
+      return L.glyphs.length >= 3 && Math.min(...hs) >= Math.max(...hs) * 0.5 && L.aspect >= 0.3 && L.aspect <= 1.6;
+    };
+    leftovers = lines.filter(L => !madeLines.includes(L) && textLike(L) &&
+      L.gh >= imgH * 0.006 && lineCleanliness(L) >= (L.gh < 30 ? 0.7 : 0.8) &&
+      !made.some(z => L.x + L.w / 2 > z.x && L.x + L.w / 2 < z.x + z.w && L.y + L.h / 2 > z.y && L.y + L.h / 2 < z.y + z.h));
     selIdx = -1; syncEditor(); renderList(); refresh();
     const parts = [];
     if (count.region) parts.push('地區×' + count.region);
@@ -1118,16 +1253,19 @@ function autoApply() {
     if (parts.length) {
       msg.className = '';
       msg.innerHTML = '已套用：' + parts.join('、') +
-        '（橘框）<br>請檢查畫面，沒問題就按「匯出 DDS」。<br>有偏差可在「手動微調」裡調整。';
+        '（橘框）<br>請檢查畫面，沒問題就按「匯出 DDS」。<br>有偏差可在「手動微調」裡調整。' +
+        (leftovers.length ? '<br><span style="color:#ff8080">還有 ' + leftovers.length +
+          ' 處看起來像字但沒換到（紅框）。不要的話按「塗掉殘留」框選塗掉。</span>' : '');
     } else {
       msg.className = 'err';
-      msg.textContent = '找不到對應的文字，請改用「手動微調」新增文字框。';
+      msg.textContent = '找不到對應的文字，請改用「手動微調」新增文字框。' +
+        (leftovers.length ? '（紅框是看起來像字的地方）' : '');
     }
   }, 30);
 }
 
 /* ---- 文字框清單 / 編輯面板 ---- */
-const CLS_NAME = { region: '地區', branch: '分局', num: '編號', regionAbbr: '車頂地區', branchAbbr: '車頂分局' };
+const CLS_NAME = { region: '地區', branch: '分局', num: '編號', regionAbbr: '車頂地區', branchAbbr: '車頂分局', eraser: '塗掉' };
 const listEl = document.getElementById('zoneList');
 function renderList() {
   listEl.innerHTML = '';
@@ -1189,6 +1327,13 @@ wrap.addEventListener('pointerdown', e => {
     mode = 'normal'; wrap.className = '';
     return;
   }
+  if (mode === 'erase') {
+    drag = { kind: 'create', sx: p.x, sy: p.y };
+    zones.push({ x: p.x, y: p.y, w: 1, h: 1, text: '', size: 10, color: '#000000', bg: '#ffffff', fill: true,
+      mirror: false, rot: 0, tilt: 0, spacing: 0, cls: 'eraser' });
+    selIdx = zones.length - 1;
+    return;
+  }
   if (mode === 'add') {
     drag = { kind: 'create', sx: p.x, sy: p.y };
     zones.push({ x: p.x, y: p.y, w: 1, h: 1, text: '', size: lastSize, color: '#14142a', bg: '#f5f5f5', fill: true, mirror: false, rot: 0, tilt: 0, spacing: 0 });
@@ -1232,9 +1377,19 @@ wrap.addEventListener('pointerup', () => {
   if (drag && drag.kind === 'create') {
     const z = zones[selIdx];
     if (z.w < 5 || z.h < 5) { zones.pop(); selIdx = -1; }
+    else if (z.cls === 'eraser') {
+      z.erase = buildRectErase(z);
+      // 框住的紅框提醒就拿掉
+      leftovers = leftovers.filter(L => !(L.x + L.w / 2 > z.x && L.x + L.w / 2 < z.x + z.w && L.y + L.h / 2 > z.y && L.y + L.h / 2 < z.y + z.h));
+      compose();
+    }
     mode = 'normal'; wrap.className = '';
     document.getElementById('btnAdd').classList.remove('active');
+    document.getElementById('btnErase').classList.remove('active');
     syncEditor(); renderList();
+  } else if (drag && (drag.kind === 'move' || drag.kind === 'resize')) {
+    const z = zones[selIdx];
+    if (z && z.cls === 'eraser') { z.erase = buildRectErase(z); compose(); }
   }
   if (drag && drag.kind === 'pan') wrap.style.cursor = 'grab';
   if (drag && drag.kind !== 'pan') saveAuto();
@@ -1270,6 +1425,7 @@ function loadFile(file) {
   fileBase = name.replace(/\.[^.]+$/, '');
   const finish = canvas => {
     baseCanvas = canvas; imgW = canvas.width; imgH = canvas.height;
+    leftovers = []; _detCache = null;
     composed.width = imgW; composed.height = imgH;
     document.getElementById('fileName').textContent = name + '（' + imgW + '×' + imgH + '）';
     zones = [];
@@ -1346,6 +1502,13 @@ function saveAuto() {
 }
 document.getElementById('btnOpen').onclick = () => pickFile('.dds,.png,.jpg,.jpeg', loadFile);
 document.getElementById('btnAuto').onclick = autoApply;
+document.getElementById('btnErase').onclick = () => {
+  if (!baseCanvas) { alert('請先開啟圖片'); return; }
+  mode = 'erase'; wrap.className = 'adding';
+  document.getElementById('btnErase').classList.add('active');
+  const msg = document.getElementById('autoMsg');
+  msg.className = ''; msg.textContent = '在圖上拖曳框住要塗掉的殘留（框內的灰黑色筆畫會塗成底色，彩色圖案和車身不會動）。';
+};
 document.getElementById('btnAdd').onclick = () => {
   if (!baseCanvas) { alert('請先開啟圖片'); return; }
   mode = 'add'; wrap.className = 'adding';
