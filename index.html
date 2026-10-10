@@ -355,6 +355,7 @@ function makeDDS(rgba, w, h, opt = {}) {
 const NUM_FONTS = [
   ['Arial Black', '"Arial Black",Arial,sans-serif'],
   ['Arial', 'Arial,sans-serif'],
+  ['Arial Bold', 'Arial,sans-serif', '700'],
   ['Segoe UI', '"Segoe UI",Arial,sans-serif'],
   ['微軟正黑體', '"Microsoft JhengHei",sans-serif'],
   ['Bahnschrift', 'Bahnschrift,Arial,sans-serif'],
@@ -1407,7 +1408,11 @@ function onFontChange(e) {
   const id = e.target.id;
   if (e.target.value === '__load__') { loadUserFont(id); return; }
   const key = { fNumFont: 'numFont', fNumWeight: 'numWeight', fCjkFont: 'cjkFont', fCjkWeight: 'cjkWeight', fNumSpacing: 'numSpacing' }[id];
-  setFonts({ ...fontSet, [key]: e.target.value }, true);
+  const next = { ...fontSet, [key]: e.target.value };
+  // 字型本身帶固定粗細（如 Arial Bold）時，粗細跟著切換
+  const preset = key === 'numFont' ? NUM_FONTS.find(f => f[0] === e.target.value) : null;
+  if (preset && preset[2]) next.numWeight = preset[2];
+  setFonts(next, true);
 }
 ['fNumFont', 'fNumWeight', 'fCjkFont', 'fCjkWeight', 'fNumSpacing'].forEach(id =>
   document.getElementById(id).addEventListener('change', onFontChange));
