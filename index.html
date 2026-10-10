@@ -61,6 +61,18 @@
     margin-top: 14px; padding-top: 10px; border-top: 1px solid #444;
     color: #999; font-size: 12.5px; line-height: 1.7;
   }
+  select.fsel, select.wsel {
+    background: #1a1a20; color: #eee; border: 1px solid #555; border-radius: 4px;
+    padding: 5px 4px; font-family: inherit; font-size: 13px; min-width: 0;
+  }
+  select.fsel { flex: 1; }
+  select.wsel { width: 64px; flex: none; }
+  #fontPreview {
+    background: #f5f5f5; color: #14142a; border-radius: 4px; padding: 6px 8px; margin: -2px 0 12px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; overflow: hidden;
+  }
+  #pvNum { font-size: 22px; white-space: nowrap; }
+  #pvCjk { font-size: 15px; white-space: nowrap; }
   #zoomLabel { color: #aaa; min-width: 48px; text-align: center; }
   details { margin-top: 16px; border-top: 1px solid #444; padding-top: 8px; }
   summary { cursor: pointer; color: #9db8e8; font-size: 15px; margin-bottom: 8px; }
@@ -90,6 +102,12 @@
       <input type="text" id="fBranchAbbr" placeholder="分局(自動)"></div>
     <div class="field"><label>傾斜角度</label><input type="number" id="fTilt" value="0" step="0.5" style="width:70px;flex:none">
       <span style="color:#999;font-size:12px">度（正＝右高，0＝自動）</span></div>
+    <div class="field"><label>數字字型</label><select id="fNumFont" class="fsel"></select>
+      <select id="fNumWeight" class="wsel"></select></div>
+    <div class="field"><label>中文字型</label><select id="fCjkFont" class="fsel"></select>
+      <select id="fCjkWeight" class="wsel"></select></div>
+    <div class="field"><label>數字字距</label><select id="fNumSpacing" class="fsel"></select></div>
+    <div id="fontPreview"><span id="pvNum">0123456789</span><span id="pvCjk">桃園市政府警察局</span></div>
     <button id="btnAuto" class="big">自動偵測並套用</button>
     <div id="autoMsg">留空的欄位不會修改。<br>按下後會自動找到圖上所有文字（含鏡像面），以相同大小、顏色換成新文字。</div>
 
@@ -127,7 +145,7 @@
       3. 按「自動偵測並套用」<br>
       4. 檢查沒問題後按「匯出 DDS」<br>
       <br>
-      字型：中文標楷體、數字 Arial Black。<br>
+      字型可在上方「數字字型／中文字型」更換。<br>
       設定會依檔名自動記住。
     </div>
   </aside>
@@ -333,10 +351,37 @@ function makeDDS(rgba, w, h, opt = {}) {
 }
 
 /* ============ 應用程式狀態 ============ */
-const FONT = '"DFKai-SB","標楷體","KaiTi",serif';       // 中文：標楷體（不加粗）
-const NUMFONT = '"Arial Black",Arial,sans-serif';        // 數字：Arial Black（粗體）
+// 字型設定：數字與中文各自可選字型與粗細；預設 數字＝Arial Black、中文＝標楷體不加粗
+const NUM_FONTS = [
+  ['Arial Black', '"Arial Black",Arial,sans-serif'],
+  ['Arial', 'Arial,sans-serif'],
+  ['Segoe UI', '"Segoe UI",Arial,sans-serif'],
+  ['微軟正黑體', '"Microsoft JhengHei",sans-serif'],
+  ['Bahnschrift', 'Bahnschrift,Arial,sans-serif'],
+  ['Tahoma', 'Tahoma,sans-serif'],
+  ['Verdana', 'Verdana,sans-serif'],
+  ['Calibri', 'Calibri,sans-serif'],
+  ['Impact', 'Impact,sans-serif'],
+];
+const CJK_FONTS = [
+  ['標楷體', '"DFKai-SB","標楷體","KaiTi",serif'],
+  ['微軟正黑體', '"Microsoft JhengHei",sans-serif'],
+  ['新細明體', '"PMingLiU","MingLiU",serif'],
+];
+const WEIGHTS = [['一般', '400'], ['半粗', '600'], ['粗', '700'], ['特粗', '900']];
+const DEFAULT_FONTS = { numFont: 'Arial Black', numWeight: '900', cjkFont: '標楷體', cjkWeight: '400', numSpacing: 'auto' };
+// 數字字距：auto＝跟原圖一樣；其他＝字級的倍數
+const NUM_SPACINGS = [['跟原本一樣', 'auto'], ['緊密', '0'], ['一般', '0.08'], ['寬', '0.25'], ['很寬', '0.45']];
+let fontSet = { ...DEFAULT_FONTS };
+const userFonts = [];   // 使用者載入的字型檔 [顯示名稱, CSS family]
+function famOf(name, list) {
+  const hit = list.find(f => f[0] === name) || userFonts.find(f => f[0] === name);
+  return hit ? hit[1] : list[0][1];
+}
 function fontFor(text, size) {
-  return /^[0-9 ]+$/.test(text) ? '900 ' + size + 'px ' + NUMFONT : size + 'px ' + FONT;
+  return /^[0-9 ]+$/.test(text)
+    ? fontSet.numWeight + ' ' + size + 'px ' + famOf(fontSet.numFont, NUM_FONTS)
+    : fontSet.cjkWeight + ' ' + size + 'px ' + famOf(fontSet.cjkFont, CJK_FONTS);
 }
 const wrap = document.getElementById('canvasWrap');
 const view = document.getElementById('view');
@@ -585,7 +630,7 @@ function sampleBg(line) {
   for (const k in counts) if (!best || counts[k].n > best.n) best = counts[k];
   return rgbHex(best.r / best.n | 0, best.g / best.n | 0, best.b / best.n | 0);
 }
-// 字級校正：實際量測標楷體字的墨水高度，讓新字大小 = 舊字大小
+// 字級校正：實際量測目前字型的墨水高度，讓新字大小 = 舊字大小（換字型時要清掉重量）
 let _calib = null;
 function calibFactor(kind) {
   if (!_calib) {
@@ -594,7 +639,7 @@ function calibFactor(kind) {
       const c = document.createElement('canvas');
       c.width = 300; c.height = 300;
       const g = c.getContext('2d');
-      g.font = k === 'num' ? '900 200px ' + NUMFONT : '200px ' + FONT;
+      g.font = fontFor(k === 'num' ? '8' : '警', 200);
       g.textBaseline = 'top';
       g.fillText(ch, 40, 30);
       const d = g.getImageData(0, 0, 300, 300).data;
@@ -667,12 +712,15 @@ const TPL_FONTS_NUM = [
   'bold {s}px "Microsoft JhengHei"',
   '{s}px Impact',
   'bold {s}px Arial',
+  '{s}px Arial',
+  '600 {s}px "Segoe UI"',
 ];
 function charTemplates(ch, px) {
   const b = Math.max(10, Math.min(140, Math.round(px / 2) * 2));
-  const key = ch + '@' + b;
+  const cur = fontFor(/[0-9]/.test(ch) ? '0' : '字', '{s}');
+  const key = ch + '@' + b + '@' + cur;
   if (_tpl[key] !== undefined) return _tpl[key];
-  const fonts = /[0-9]/.test(ch) ? TPL_FONTS_NUM : TPL_FONTS_CJK;
+  const fonts = [...(/[0-9]/.test(ch) ? TPL_FONTS_NUM : TPL_FONTS_CJK), cur];
   const W = b * 2 + 20;
   const out = [];
   for (const f of fonts) {
@@ -851,7 +899,7 @@ function cjkGlyphs(L, ink) {
   const out = [];
   for (const g of src) {
     const cur = out[out.length - 1];
-    if (cur && g.x - (cur.x + cur.w) < L.gh * 0.25 && Math.max(cur.x + cur.w, g.x + g.w) - cur.x <= L.gh * 1.1) {
+    if (cur && g.x - (cur.x + cur.w) < L.gh * 0.25 && Math.max(cur.x + cur.w, g.x + g.w) - cur.x <= L.gh * 1.25) {
       const x2 = Math.max(cur.x + cur.w, g.x + g.w), y2 = Math.max(cur.y + cur.h, g.y + g.h);
       cur.y = Math.min(cur.y, g.y); cur.w = x2 - cur.x; cur.h = y2 - cur.y;
     } else out.push({ x: g.x, y: g.y, w: g.w, h: g.h });
@@ -884,6 +932,8 @@ function scoreLine(L, ink, fieldList) {
     for (let i = 0; i < chars.length; i++) {
       const g = gl[idxs[i]];
       if (!g) return null;
+      // 「分局」「警察局」這類字不會是扁長條；車身飾條縮成方格後什麼都像，要先排除
+      if (g.w > g.h * 1.8) return null;
       const v = charSim(glyphMask(inkCv, L, g, xf), chars[i], g.h);
       if (v < 0) return null;
       s += v; if (v > mx) mx = v;
@@ -978,6 +1028,7 @@ function autoApply() {
       let spacing = text.length > 1 ? (L.w - natural) / (text.length - 1) : 0;
       const pitch = linePitch(L, isNum ? L.glyphs : cjkGlyphs(L));
       if (pitch && text.length > 1) spacing = pitch - natural / text.length;
+      if (isNum && fontSet.numSpacing !== 'auto') spacing = size * parseFloat(fontSet.numSpacing);
       // 傾斜角度：設定選單有填就用設定值（反序面自動用相反方向），否則沿用原文字量到的角度；車頂組不套用
       const userTilt = parseFloat(document.getElementById('fTilt').value) || 0;
       const tilt = userTilt !== 0 && mode !== 'rot180'
@@ -1220,6 +1271,7 @@ function loadFile(file) {
           document.getElementById('fTilt').value = saved.fields.tilt || 0;
           document.getElementById('fRegionAbbr').value = saved.fields.regionAbbr || '';
           document.getElementById('fBranchAbbr').value = saved.fields.branchAbbr || '';
+          if (saved.fields.fonts) setFonts(saved.fields.fonts, false);
         }
       }
     } catch (e) {}
@@ -1274,6 +1326,7 @@ function saveAuto() {
     num: document.getElementById('fNum').value,
     tilt: document.getElementById('fTilt').value,
     regionAbbr: document.getElementById('fRegionAbbr').value,
+    fonts: fontSet,
     branchAbbr: document.getElementById('fBranchAbbr').value,
   };
   try { localStorage.setItem('livery:' + fileBase, JSON.stringify({ zones, fields })); } catch (e) {}
@@ -1315,6 +1368,99 @@ document.getElementById('btnLoadTpl').onclick = () => pickFile('.json', f => {
 });
 document.getElementById('chkFrames').onchange = render;
 window.addEventListener('resize', render);
+/* ---- 字型設定 ---- */
+function fillFontSelect(sel, list, value) {
+  sel.innerHTML = '';
+  for (const [name] of [...list, ...userFonts]) sel.add(new Option(name, name));
+  sel.add(new Option('載入字型檔…', '__load__'));
+  sel.value = value;
+  if (sel.value !== value) sel.value = list[0][0];
+}
+function fillWeightSelect(sel, value) {
+  sel.innerHTML = '';
+  for (const [name, w] of WEIGHTS) sel.add(new Option(name, w));
+  sel.value = value;
+}
+function syncFontUI() {
+  fillFontSelect(document.getElementById('fNumFont'), NUM_FONTS, fontSet.numFont);
+  fillFontSelect(document.getElementById('fCjkFont'), CJK_FONTS, fontSet.cjkFont);
+  fillWeightSelect(document.getElementById('fNumWeight'), fontSet.numWeight);
+  fillWeightSelect(document.getElementById('fCjkWeight'), fontSet.cjkWeight);
+  const sp = document.getElementById('fNumSpacing');
+  sp.innerHTML = '';
+  for (const [name, v] of NUM_SPACINGS) sp.add(new Option(name, v));
+  sp.value = fontSet.numSpacing;
+  document.getElementById('pvNum').style.font = fontFor('0', 22);
+  document.getElementById('pvCjk').style.font = fontFor('字', 15);
+}
+// 換字型：清掉字級校正與模板快取；已經套用過的自動文字框重新套用（大小、字距要跟著新字型重算）
+function setFonts(fs2, reapply) {
+  fontSet = { ...DEFAULT_FONTS, ...fs2 };
+  _calib = null;
+  for (const k in _tpl) delete _tpl[k];
+  try { localStorage.setItem('livery:fonts', JSON.stringify(fontSet)); } catch (e) {}
+  syncFontUI();
+  if (reapply && zones.some(z => z.auto)) autoApply();
+  else if (baseCanvas) refresh();
+}
+function onFontChange(e) {
+  const id = e.target.id;
+  if (e.target.value === '__load__') { loadUserFont(id); return; }
+  const key = { fNumFont: 'numFont', fNumWeight: 'numWeight', fCjkFont: 'cjkFont', fCjkWeight: 'cjkWeight', fNumSpacing: 'numSpacing' }[id];
+  setFonts({ ...fontSet, [key]: e.target.value }, true);
+}
+['fNumFont', 'fNumWeight', 'fCjkFont', 'fCjkWeight', 'fNumSpacing'].forEach(id =>
+  document.getElementById(id).addEventListener('change', onFontChange));
+
+function fontDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('livery-fonts', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('fonts', { keyPath: 'name' });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function registerUserFont(name, data) {
+  const family = 'UserFont_' + (userFonts.length + 1);
+  const ff = new FontFace(family, data);
+  await ff.load();
+  document.fonts.add(ff);
+  if (!userFonts.some(u => u[0] === name)) userFonts.push([name, '"' + family + '"']);
+}
+function loadUserFont(selId) {
+  pickFile('.ttf,.otf,.woff,.woff2,.ttc', async file => {
+    const name = file.name.replace(/\.[^.]+$/, '');
+    try {
+      const data = await file.arrayBuffer();
+      await registerUserFont(name, data);
+      try {
+        const db = await fontDB();
+        db.transaction('fonts', 'readwrite').objectStore('fonts').put({ name, data });
+      } catch (e) {}
+      const key = selId === 'fCjkFont' ? 'cjkFont' : 'numFont';
+      setFonts({ ...fontSet, [key]: name }, true);
+    } catch (err) {
+      alert('字型檔讀取失敗：' + err.message);
+      syncFontUI();
+    }
+  });
+  syncFontUI();   // 先把選單還原，避免停在「載入字型檔…」
+}
+async function restoreUserFonts() {
+  try {
+    const db = await fontDB();
+    const all = await new Promise(res => {
+      const r = db.transaction('fonts').objectStore('fonts').getAll();
+      r.onsuccess = () => res(r.result || []);
+      r.onerror = () => res([]);
+    });
+    for (const f of all) { try { await registerUserFont(f.name, f.data); } catch (e) {} }
+  } catch (e) {}
+}
+try { fontSet = { ...DEFAULT_FONTS, ...JSON.parse(localStorage.getItem('livery:fonts') || '{}') }; } catch (e) {}
+syncFontUI();
+restoreUserFonts().then(() => { syncFontUI(); _calib = null; if (baseCanvas) refresh(); });
+
 bindEditor();
 render();
 // 測試用掛鉤
