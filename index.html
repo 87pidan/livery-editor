@@ -106,7 +106,10 @@
       <select id="fNumWeight" class="wsel"></select></div>
     <div class="field"><label>中文字型</label><select id="fCjkFont" class="fsel"></select>
       <select id="fCjkWeight" class="wsel"></select></div>
-    <div class="field"><label>數字字距</label><select id="fNumSpacing" class="fsel"></select></div>
+    <div class="field"><label>數字字距</label>
+      <label style="display:flex;align-items:center;gap:3px;cursor:pointer;width:auto;color:#ccc"><input type="checkbox" id="fNumSpAuto">自動</label>
+      <input type="range" id="fNumSpRange" min="-20" max="100" step="1" style="flex:1;min-width:0">
+      <input type="number" id="fNumSpVal" min="-20" max="100" step="1" style="width:50px;flex:none"><span style="color:#999;font-size:12px">%</span></div>
     <div id="fontPreview"><span id="pvNum">0123456789</span><span id="pvCjk">桃園市政府警察局</span></div>
     <button id="btnAuto" class="big">自動偵測並套用</button>
     <div id="autoMsg">留空的欄位不會修改。<br>按下後會自動找到圖上所有文字（含鏡像面），以相同大小、顏色換成新文字。</div>
@@ -127,6 +130,8 @@
             <option value="0">0°</option><option value="90">90°</option>
             <option value="180">180°</option><option value="270">270°</option>
           </select></div>
+        <div class="field"><label>字距</label><input type="number" id="zSpacing" step="1" style="width:70px;flex:none">
+          <span style="color:#999;font-size:12px">像素（只改這一框）</span></div>
         <div class="field"><label>傾斜角度</label><input type="number" id="zTilt" step="0.5" style="width:70px;flex:none">
           <span style="color:#999;font-size:12px">度（正＝右高）</span></div>
         <div class="field"><button id="btnDelZone" class="minor" style="background:#8d3a3a">刪除此文字框</button></div>
@@ -372,7 +377,12 @@ const CJK_FONTS = [
 const WEIGHTS = [['一般', '400'], ['半粗', '600'], ['粗', '700'], ['特粗', '900']];
 const DEFAULT_FONTS = { numFont: 'Arial Black', numWeight: '900', cjkFont: '標楷體', cjkWeight: '400', numSpacing: 'auto' };
 // 數字字距：auto＝跟原圖一樣；其他＝字級的倍數
-const NUM_SPACINGS = [['跟原本一樣', 'auto'], ['緊密', '0'], ['一般', '0.08'], ['寬', '0.25'], ['很寬', '0.45']];
+// 數字字距：'auto'＝跟原圖一樣；數字＝字級的百分比（0＝字型本身的間距，負數＝更緊）
+function numSpacingFor(size, autoSp) {
+  if (fontSet.numSpacing === 'auto') return autoSp;
+  const v = size * parseFloat(fontSet.numSpacing);
+  return Math.round(Math.max(-size * 0.3, Math.min(size * 1.6, v)));
+}
 let fontSet = { ...DEFAULT_FONTS };
 const userFonts = [];   // 使用者載入的字型檔 [顯示名稱, CSS family]
 function famOf(name, list) {
@@ -1029,7 +1039,7 @@ function autoApply() {
       let spacing = text.length > 1 ? (L.w - natural) / (text.length - 1) : 0;
       const pitch = linePitch(L, isNum ? L.glyphs : cjkGlyphs(L));
       if (pitch && text.length > 1) spacing = pitch - natural / text.length;
-      if (isNum && fontSet.numSpacing !== 'auto') spacing = size * parseFloat(fontSet.numSpacing);
+      const autoSpacing = Math.round(Math.max(0, Math.min(spacing, size * 1.6)));
       // 傾斜角度：設定選單有填就用設定值（反序面自動用相反方向），否則沿用原文字量到的角度；車頂組不套用
       const userTilt = parseFloat(document.getElementById('fTilt').value) || 0;
       const tilt = userTilt !== 0 && mode !== 'rot180'
@@ -1040,7 +1050,7 @@ function autoApply() {
         x: L.x - pad, y: L.y - pad, w: L.w + pad * 2, h: L.h + pad * 2,
         text, size, color: L.color, bg: sampleBg(L), fill: true,
         mirror: mode === 'mirror', rot: mode === 'rot180' ? 180 : 0,
-        tilt, spacing: Math.round(Math.max(0, Math.min(spacing, size * 1.6))), auto: true,
+        tilt, spacing: isNum ? numSpacingFor(size, autoSpacing) : autoSpacing, autoSpacing, auto: true,
         cls, mode, erase: buildEraseMask(L, label, allComps)
       };
     };
@@ -1144,6 +1154,7 @@ function syncEditor() {
   document.getElementById('zMirror').checked = z.mirror;
   document.getElementById('zRot').value = z.rot;
   document.getElementById('zTilt').value = z.tilt || 0;
+  document.getElementById('zSpacing').value = z.spacing || 0;
 }
 function bindEditor() {
   const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
@@ -1155,6 +1166,7 @@ function bindEditor() {
   on('zMirror', 'change', e => { const z = zones[selIdx]; if (z) { z.mirror = e.target.checked; refresh(); renderList(); } });
   on('zRot', 'change', e => { const z = zones[selIdx]; if (z) { z.rot = +e.target.value; refresh(); } });
   on('zTilt', 'input', e => { const z = zones[selIdx]; if (z) { z.tilt = parseFloat(e.target.value) || 0; refresh(); } });
+  on('zSpacing', 'input', e => { const z = zones[selIdx]; if (z) { z.spacing = parseFloat(e.target.value) || 0; refresh(); } });
   on('btnDelZone', 'click', () => { if (selIdx >= 0) { zones.splice(selIdx, 1); selIdx = -1; syncEditor(); refresh(); renderList(); } });
   on('pickText', 'click', () => { mode = 'pickText'; wrap.className = 'picking'; });
   on('pickBg', 'click', () => { mode = 'pickBg'; wrap.className = 'picking'; });
@@ -1387,10 +1399,12 @@ function syncFontUI() {
   fillFontSelect(document.getElementById('fCjkFont'), CJK_FONTS, fontSet.cjkFont);
   fillWeightSelect(document.getElementById('fNumWeight'), fontSet.numWeight);
   fillWeightSelect(document.getElementById('fCjkWeight'), fontSet.cjkWeight);
-  const sp = document.getElementById('fNumSpacing');
-  sp.innerHTML = '';
-  for (const [name, v] of NUM_SPACINGS) sp.add(new Option(name, v));
-  sp.value = fontSet.numSpacing;
+  const isAuto = fontSet.numSpacing === 'auto';
+  const pct = isAuto ? 10 : Math.round(parseFloat(fontSet.numSpacing) * 100);
+  document.getElementById('fNumSpAuto').checked = isAuto;
+  document.getElementById('fNumSpRange').value = pct;
+  document.getElementById('fNumSpVal').value = isAuto ? '' : pct;
+  document.getElementById('fNumSpVal').placeholder = isAuto ? '自動' : '';
   document.getElementById('pvNum').style.font = fontFor('0', 22);
   document.getElementById('pvCjk').style.font = fontFor('字', 15);
 }
@@ -1407,16 +1421,36 @@ function setFonts(fs2, reapply) {
 function onFontChange(e) {
   const id = e.target.id;
   if (e.target.value === '__load__') { loadUserFont(id); return; }
-  const key = { fNumFont: 'numFont', fNumWeight: 'numWeight', fCjkFont: 'cjkFont', fCjkWeight: 'cjkWeight', fNumSpacing: 'numSpacing' }[id];
+  const key = { fNumFont: 'numFont', fNumWeight: 'numWeight', fCjkFont: 'cjkFont', fCjkWeight: 'cjkWeight' }[id];
   const next = { ...fontSet, [key]: e.target.value };
   // 字型本身帶固定粗細（如 Arial Bold）時，粗細跟著切換
   const preset = key === 'numFont' ? NUM_FONTS.find(f => f[0] === e.target.value) : null;
   if (preset && preset[2]) next.numWeight = preset[2];
   setFonts(next, true);
 }
-['fNumFont', 'fNumWeight', 'fCjkFont', 'fCjkWeight', 'fNumSpacing'].forEach(id =>
+['fNumFont', 'fNumWeight', 'fCjkFont', 'fCjkWeight'].forEach(id =>
   document.getElementById(id).addEventListener('change', onFontChange));
 
+function setNumSpacing(val) {
+  fontSet = { ...fontSet, numSpacing: val };
+  try { localStorage.setItem('livery:fonts', JSON.stringify(fontSet)); } catch (e) {}
+  for (const z of zones) {
+    if (z.auto && /^[0-9 ]+$/.test(z.text)) z.spacing = numSpacingFor(z.size, z.autoSpacing ?? z.spacing);
+  }
+  syncFontUI();
+  if (selIdx >= 0) syncEditor();
+  if (baseCanvas) refresh();
+}
+document.getElementById('fNumSpAuto').addEventListener('change', e => {
+  setNumSpacing(e.target.checked ? 'auto' : String((+document.getElementById('fNumSpRange').value) / 100));
+});
+for (const id of ['fNumSpRange', 'fNumSpVal']) {
+  document.getElementById(id).addEventListener('input', e => {
+    const v = parseFloat(e.target.value);
+    if (isNaN(v)) return;
+    setNumSpacing(String(Math.max(-20, Math.min(100, v)) / 100));
+  });
+}
 function fontDB() {
   return new Promise((res, rej) => {
     const r = indexedDB.open('livery-fonts', 1);
